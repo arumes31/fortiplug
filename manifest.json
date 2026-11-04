@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "name": "FortiPlug",
+  "version": "0.3.0",
+  "description": "Enhancements for the FortiGate web GUI.",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "permissions": ["clipboardWrite", "storage", "<all_urls>"],
+  "browser_action": {
+    "default_icon": "icons/icon.svg",
+    "default_title": "FortiPlug",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "src/core.js",
+        "src/features/copy-policies.js",
+        "src/features/policy-clipboard.js",
+        "src/features/bulk-interfaces.js",
+        "src/main.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fortiplug@arumes31.github.io",
+      "strict_min_version": "115.0"
+    }
+  }
+}
