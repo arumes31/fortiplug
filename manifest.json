@@ -18,9 +18,11 @@
       "matches": ["<all_urls>"],
       "js": [
         "src/core.js",
+        "src/policy-names.js",
         "src/features/copy-policies.js",
         "src/features/policy-clipboard.js",
         "src/features/bulk-interfaces.js",
+        "src/features/bulk-rename.js",
         "src/main.js"
       ],
       "run_at": "document_idle"

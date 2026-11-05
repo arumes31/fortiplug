@@ -27,6 +27,7 @@ Copy the CLI config of filtered policies, copy & paste any policy, bulk-edit int
 | 📋 **Copy filtered policies** | Copies the CLI config (`config firewall policy … end`) of every policy currently shown in the list — after search and filters — in GUI order. | FP button · `Alt+Shift+C` |
 | 📑 **Copy / paste any policy** | Copy a policy and paste it above or below another one — also for policies with **multiple interfaces**, where the GUI's own paste is disabled. | Right-click a policy |
 | 🔀 **Bulk edit interfaces** | Replace, add or remove **multiple** source / destination interfaces on many policies at once, with a live old → new preview. | FP button · right-click · `Alt+Shift+I` |
+| ✏️ **Bulk rename policies** | Generate names from interfaces and services, add an optional software name, and review an editable preview. Automatically shortens names to 40 characters. | FP button · right-click |
 | 🩺 **Diagnose** | Shows what FortiPlug detects on the page (columns, IDs, selection, last right-click). | FP button |
 
 All changes go through the FortiGate REST API using **your existing GUI session** — no API token, no stored credentials.
@@ -145,11 +146,34 @@ The copied policy survives page reloads, so you can also paste on **another Fort
 
 ---
 
+### ✏️ Bulk rename policies
+
+1. Select policies in the GUI, then open **FP → Bulk rename policies** or the corresponding right-click action. You can also tick policies in the dialog.
+2. Review the generated names: `VL01-WAN (TCP80, TCP443)`. The service names come from the policy's configured service objects or groups.
+3. Review **Interface aliases / groups**. The dialog starts with `x8=WAN` and `VPN_EX-ADM*=VPN_ADM`; change or remove these for your network. Exact names take precedence over wildcard rules. A trailing `*` matches a group. Several interfaces mapping to the same alias use that alias; other combinations use **VLXX**. Source and destination placeholders can be overridden separately. These settings change generated names, not the policy's interfaces.
+4. Optionally enter a common software / purpose to generate `VL01-WAN_Software (TCP80, HTTPS)`. Every policy also has an individual purpose field. The priority is **individual purpose → common software → existing description (when reuse is enabled) → address objects → no purpose**. An explicitly empty individual purpose keeps the name without a purpose until **Regenerate names**. Enable **Reuse existing descriptions** to suggest purposes such as `BTA-Farm/LoopBack` from old names. Recognized service-only descriptions and generated `(Copy of …)` annotations are skipped. Existing `_Purpose` suffixes are recognized when their interface pair matches. Free-form names remain visible for manual interpretation; truncated descriptions cannot be reconstructed.
+5. VIP and virtual-server destinations use `SRC-DST (VIP_externalPort-mappedPort-WANIP-target)`, for example `VL01-WAN (VIP_443-8443-203.0.113.10-10.0.0.10)` before shortening. `VIP_` appears once, including when there are several mappings. VIP groups are resolved to their members; virtual servers use each realserver's port and IP. VIPs without port forwarding use `ALL-ALL`. Incomplete mappings are flagged for manual correction.
+6. The **Shared name limit** defaults to **40 characters** and can be set from 20 to 40, including 35. It is saved in the extension and also used for copied policy names. Software / purpose has priority: extra services are omitted and the remaining service text is shortened before the software name itself is shortened. Shortening uses **at most one literal dot (`.`)** per generated name, never `…`, `...` or repeated shortening groups. Full IP addresses retain their normal dots. Long VIP names prefer **destination name/IP and mapped port**, e.g. `VIP_192.168.1.192_5353`. Add a target IP alias such as `192.168.1.192=DNS01` to get `VIP_DNS01_5353`. Incoming port and WAN IP are omitted first. If the destination cannot fit, `VIP_._5353` or `VIP_5353` retains the destination port; ports and IPs are never shown as partial numeric fragments. When the header also needs shortening, all services or VIP mappings are summarized with `+N` so only the header uses a shortening dot. Parentheses, counts and ID suffixes are preserved. Hover for the full suggestion and expand **Policy details** for complete mappings. Manual names are validated against the limit. **Regenerate names** clears manual names and individual purposes.
+7. **Automatically generated names preserve the complete interface pair.** It is never truncated; only the purpose and service/VIP details are shortened. **Manual name edits can override the pair**, e.g. replace `VLXX-virtual-wan-link` with `VLXX-sdwan`. Manual names are saved exactly as entered and still checked for length, unsupported characters, empty values and duplicates. If the generated pair and reserved details cannot fit, choose shorter interface aliases, a larger limit or edit the name manually. Duplicate generated names automatically get `_ID<policy-ID>`, including conflicts with policies outside the filtered list. The ID is preserved within the character limit. Manual names remain unchanged and conflicts are flagged.
+8. Expand **Policy details** to compare source addresses, source/destination ISDB entries, destination objects, services, action, inspection settings and security profiles. Deny policies include **DENY** in their generated names. This helps distinguish rules with the same interfaces and VIPs but different whitelists, scanners or inspection profiles.
+9. Resolve validation errors, then click **Rename N policies** and confirm. Only the policy name is written. Results appear per policy. Closing the dialog after successful changes reloads the list. VIP and VIP-group read access is required to detect destinations correctly. Interface/object aliases, object-label options, placeholders and purposes are edited per dialog; the shared character limit persists.
+
+**Automatic address-based purposes** are enabled by default and can be switched off with **Infer an empty purpose from address objects**:
+
+- A specific destination supplies the purpose. When there is one short source and one short destination, both are included, e.g. `lan-a_DanielPC-mail (ALL)`.
+- Inferred address labels that repeat their corresponding interface are omitted. For this comparison, `LAN_`, `VLAN_` and separator differences are normalized, so interface `VLAN_VMs` and destination `LAN_VMs` do not appear twice. This does not rewrite manually entered purposes or negated address labels.
+- If the destination is `all`, a specific source supplies the purpose, e.g. `lan-a_DL+TROJA (DENY, ALL)`. `all`, `all6`, `any`, `0.0.0.0/0` and `::/0` are treated as broad objects. Active named ISDB selections are also considered. Negated selections are marked `NOT_`.
+- **Address object labels** removes the configured prefixes (default `H_, G_`) for display. Add exact or trailing-wildcard object aliases, e.g. `mail.example.com=mail` or `H_Server01=Server`. Exact aliases take precedence over wildcard aliases, including matches after prefix removal. Explicit alias values are kept as entered.
+- FQDN object names use their first hostname label by default (`mail.example.com → mail`); switch this off to retain the domain. IPv4 and IPv6 address labels stay intact. Two short names use `A+B`; larger sets use `A+B+N`, or `FirstLongName+N`. Multiple objects with the same shortened label still show their additional count.
+- Every row identifies the purpose's origin (manual, common, existing description, source, destination or both). Hover over the origin to see the full source object names. Policy details retain the full objects and VIP mappings.
+- Services always come from the policy: a destination called `mail` does not change `ALL` into SMTP. Comments are shown for review and are never used to infer a purpose. `_ID…` is added only if the final generated names still collide.
+
 ## ⚙️ Configuration
 
 | Setting | Where | Default |
 |---|---|---|
 | Pasted policies start disabled | `PASTE_DISABLED` in [`src/features/policy-clipboard.js`](src/features/policy-clipboard.js) | `true` |
+| Policy name limit (rename and paste) | **Shared name limit** in the bulk rename dialog | `40` |
 | Copy shortcut | `shortcut` in [`src/features/copy-policies.js`](src/features/copy-policies.js) | `Alt+Shift+C` |
 | Bulk edit shortcut | `shortcut` in [`src/features/bulk-interfaces.js`](src/features/bulk-interfaces.js) | `Alt+Shift+I` |
 
@@ -187,11 +211,13 @@ fortiplug/
 │   └── popup.js
 └── src/
     ├── core.js                 # feature registry, REST API (session + CSRF), UI (launcher, toast, modal)
+    ├── policy-names.js         # shared name limit, purpose extraction and structured shortening
     ├── main.js                 # FortiGate detection, activation, popup messaging
     └── features/
         ├── copy-policies.js    # list detection (shared) + copy filtered policies + diagnose
         ├── policy-clipboard.js # right-click copy / paste
-        └── bulk-interfaces.js  # bulk interface editor
+        ├── bulk-interfaces.js  # bulk interface editor
+        └── bulk-rename.js      # bulk rename with editable preview
 ```
 
 ### Adding a feature
@@ -214,6 +240,14 @@ fortiplug/
 3. Add a `<script>` tag for it in `popup/popup.html`.
 
 Useful helpers: `FP.request` / `FP.requestJson` (REST calls with session + CSRF), `FP.getVdom()`, `FP.policyList.collectList()` (IDs + selection of the current list), `FP.showModal`, `FP.toast`, `FP.copyText`.
+
+Run the naming and dialog regression tests with Node.js (no dependencies):
+
+```sh
+node --test tests/bulk-rename.test.cjs
+```
+
+Optionally set `FORTIPLUG_POLICY_SAMPLE` to the path of a local CLI policy excerpt to run the additional 43-policy reference check. This reads the file locally; the policy export is not included in the repository.
 
 ---
 
