@@ -172,7 +172,15 @@
     @media (max-width: 700px) { .modal .cols { grid-template-columns: 1fr; } }
     .modal fieldset { border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; margin: 0; min-width: 0; }
     .modal legend { font-weight: 600; padding: 0 4px; }
-    .modal select, .modal input[type="search"] { font: inherit; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; }
+    .modal select, .modal input[type="search"], .modal input[type="text"], .modal input[type="number"] { font: inherit; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; }
+    .modal .rename-preview input[type="text"] { width: 100%; min-width: 240px; }
+    .modal .rename-preview td { overflow-wrap: anywhere; }
+    .modal textarea.rename-aliases { margin: 0; width: 100%; min-height: 76px; white-space: pre; }
+    .modal .rename-preview label, .modal fieldset > label { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+    .modal label.rename-option { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+    .modal .rename-preview details { min-width: 220px; max-width: 400px; }
+    .modal .rename-preview summary { cursor: pointer; }
+    .modal .policy-detail { white-space: pre-wrap; margin-top: 5px; }
     .modal .picker { margin-top: 6px; }
     .modal .picker input[type="search"] { width: 100%; margin-bottom: 4px; }
     .modal .picker .options { max-height: 160px; overflow: auto; border: 1px solid #eee; border-radius: 4px; }

@@ -7,7 +7,6 @@
   const FP = window.FortiPlug;
   const STORE_KEY = 'policyClipboard';
   const PASTE_DISABLED = true; // pasted copies start disabled so they can be reviewed first
-  const NAME_MAX = 35;
 
   const apiPath = (table) => `/api/v2/cmdb/${table.replace(' ', '/')}`;
   const getClipboard = async () => (await browser.storage.local.get(STORE_KEY))[STORE_KEY] || null;
@@ -71,11 +70,11 @@
     FP.toast(`Policy ${id} copied. Right-click a policy to paste it above or below.`, 'ok');
   };
 
-  const uniqueName = (name, taken) => {
+  const uniqueName = (name, taken, limit) => {
     if (!name) return '';
     for (let i = 1; ; i++) {
       const suffix = i === 1 ? '_copy' : `_copy${i}`;
-      const candidate = name.slice(0, NAME_MAX - suffix.length) + suffix;
+      const candidate = FP.policyNames.copyName(name, suffix, limit);
       if (!taken.has(candidate)) return candidate;
     }
   };
@@ -95,7 +94,7 @@
     delete body.uuid;
     delete body.q_origin_key;
     body.policyid = 0; // let FortiOS assign the next free ID
-    body.name = uniqueName(body.name, taken);
+    body.name = uniqueName(body.name, taken, await FP.policyNames.getLimit());
     if (PASTE_DISABLED) body.status = 'disable';
 
     FP.toast(`Pasting policy ${clip.id} ${where} ${targetId}…`, '', 0);
@@ -121,6 +120,8 @@
     }
     const bulk = FP.features.find((f) => f.id === 'bulk-interfaces');
     if (bulk && bulk.isAvailable()) actions.push({ label: 'FortiPlug: Bulk edit interfaces…', run: bulk.run });
+    const rename = FP.features.find((f) => f.id === 'bulk-rename');
+    if (rename && rename.isAvailable()) actions.push({ label: 'FortiPlug: Bulk rename policies…', run: rename.run });
     return actions;
   };
 
