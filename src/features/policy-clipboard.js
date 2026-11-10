@@ -83,6 +83,11 @@
     const clip = await getClipboard();
     if (!clip) throw new Error('Nothing copied yet.');
     if (clip.table !== table) throw new Error(`The copied entry is a ${clip.table}, not a ${table}.`);
+    // A policy copied on another host may be unexpected (or seeded by a non-FortiGate page); ask first.
+    if (clip.host !== location.host &&
+        !confirm(`The copied policy ${clip.id} comes from ${clip.host || 'an unknown host'}, not ${location.host}. Paste it here anyway?`)) {
+      return;
+    }
     const vdom = FP.getVdom();
     const path = apiPath(table);
 
@@ -177,6 +182,7 @@
       clone.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!FP.isTrusted(e)) return;
         closeGuiMenu();
         FP.runFeature({ run: action.run });
       });
@@ -193,22 +199,29 @@
     const close = () => {
       menu.remove();
       document.removeEventListener('mousedown', onOutside, true);
+      r.removeEventListener('mousedown', onInsideRoot, true);
     };
-    const onOutside = (e) => !e.composedPath().includes(menu) && close();
+    // The UI lives in a closed shadow root: document listeners only see its host, so
+    // presses inside FortiPlug's UI are handled by a listener on the root itself.
+    const onOutside = (e) => !e.composedPath().includes(r.host) && close();
+    const onInsideRoot = (e) => !e.composedPath().includes(menu) && close();
     for (const action of actions) {
       const b = FP.el('button', {}, [FP.el('span', { textContent: action.label })]);
-      b.onclick = () => {
+      b.onclick = (e) => {
+        if (!FP.isTrusted(e)) return;
         close();
         FP.runFeature({ run: action.run });
       };
       menu.append(b);
     }
     document.addEventListener('mousedown', onOutside, true);
+    r.addEventListener('mousedown', onInsideRoot, true);
     r.appendChild(menu);
   };
 
   let lastHandled = 0;
   const onContextMenu = async (event) => {
+    if (!FP.isTrusted(event)) return; // ignore right-clicks synthesised by the page
     if (event.type === 'mousedown' && event.button !== 2) return;
     // A right-click fires both mousedown and contextmenu; handle it once.
     if (event.timeStamp - lastHandled < 500) return;

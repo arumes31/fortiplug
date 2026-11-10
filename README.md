@@ -56,7 +56,10 @@ Firefox release only installs signed extensions. Signing as *unlisted* is free a
 1. Create API credentials at **[addons.mozilla.org → Developer Hub → Manage API Keys](https://addons.mozilla.org/developers/addon/api/key/)**.
 2. Sign the extension from the repository folder:
    ```sh
-   npx web-ext sign --channel=unlisted --api-key=<JWT issuer> --api-secret=<JWT secret>
+   # Read the credentials from the environment so the secret stays out of shell history and process listings
+   export WEB_EXT_API_KEY='<JWT issuer>'
+   read -rs WEB_EXT_API_SECRET && export WEB_EXT_API_SECRET   # paste the JWT secret, then Enter
+   npx web-ext sign --channel=unlisted
    ```
 3. The signed `.xpi` is written to `web-ext-artifacts/`.
 4. In Firefox, open **`about:addons`** → ⚙️ gear icon → **Install Add-on From File…** → select the `.xpi`.
@@ -123,7 +126,7 @@ The config comes from a configuration backup, so it matches `show` exactly. If y
 3. FortiPlug creates the copy with a new ID, the name suffixed `_copy`, **disabled**, moves it into place and reloads the page.
 4. Review the copy and enable it.
 
-The copied policy survives page reloads, so you can also paste on **another FortiGate** — as long as the referenced interfaces and objects exist there.
+The copied policy survives page reloads, so you can also paste on **another FortiGate** — as long as the referenced interfaces and objects exist there. Pasting a policy that was copied on a different host asks for confirmation first.
 
 ### 🔀 Bulk edit interfaces
 
@@ -244,7 +247,7 @@ Useful helpers: `FP.request` / `FP.requestJson` (REST calls with session + CSRF)
 Run the naming and dialog regression tests with Node.js (no dependencies):
 
 ```sh
-node --test tests/bulk-rename.test.cjs
+node --test tests/
 ```
 
 Optionally set `FORTIPLUG_POLICY_SAMPLE` to the path of a local CLI policy excerpt to run the additional 43-policy reference check. This reads the file locally; the policy export is not included in the repository.

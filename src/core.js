@@ -98,6 +98,9 @@
   // Parent element, crossing shadow root boundaries.
   FP.parentOf = (el) => el.parentElement || el.parentNode?.host || null;
 
+  // Only real user input may trigger FortiPlug actions; the page can synthesise events.
+  FP.isTrusted = (event) => !!event && event.isTrusted === true;
+
   FP.isVisible = (el) => {
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
@@ -205,7 +208,8 @@
     const host = document.createElement('div');
     host.id = 'fortiplug-host';
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;';
-    shadow = host.attachShadow({ mode: 'open' });
+    // Closed, so page script cannot reach into FortiPlug's menus and modals.
+    shadow = host.attachShadow({ mode: 'closed' });
     const style = document.createElement('style');
     style.textContent = CSS;
     shadow.appendChild(style);
@@ -298,7 +302,8 @@
       menu = null;
       launcher.classList.remove('open');
     };
-    launcher.onclick = () => {
+    launcher.onclick = (e) => {
+      if (!FP.isTrusted(e)) return;
       if (menu) return closeMenu();
       const items = FP.menuFeatures();
       menu = el('div', { className: 'menu' }, [el('div', { className: 'menu-title', textContent: 'FortiPlug' })]);
@@ -306,7 +311,8 @@
       for (const f of items) {
         const b = el('button', {}, [el('span', { textContent: f.label })]);
         if (f.shortcut) b.append(el('kbd', { textContent: shortcutLabel(f.shortcut) }));
-        b.onclick = () => {
+        b.onclick = (e) => {
+          if (!FP.isTrusted(e)) return;
           closeMenu();
           FP.runFeature(f);
         };
@@ -321,6 +327,7 @@
     document.addEventListener(
       'keydown',
       (e) => {
+        if (!FP.isTrusted(e)) return;
         for (const f of FP.features) {
           const s = f.shortcut;
           if (!s || e.key.toLowerCase() !== s.key.toLowerCase()) continue;
