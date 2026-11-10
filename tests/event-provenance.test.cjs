@@ -95,6 +95,12 @@ function clipboardContext({ clip, host = 'fgt-a.test', confirmAnswer = false }) 
   const requests = [];
   const confirms = [];
   const root = new Node('#shadow');
+  const uiHost = new Node('div');
+  root.host = uiHost;
+  const rootListeners = {};
+  const documentListeners = {};
+  root.addEventListener = (t, fn) => { rootListeners[t] = fn; };
+  root.removeEventListener = (t) => { delete rootListeners[t]; };
   let feature;
   let tableLookups = 0;
   const FP = {
@@ -124,7 +130,10 @@ function clipboardContext({ clip, host = 'fgt-a.test', confirmAnswer = false }) 
   };
   const context = vm.createContext({
     window: { FortiPlug: FP, addEventListener: (t, fn) => { windowListeners[t] = fn; } },
-    document: { addEventListener() {}, removeEventListener() {} },
+    document: {
+      addEventListener: (t, fn) => { documentListeners[t] = fn; },
+      removeEventListener: (t) => { delete documentListeners[t]; },
+    },
     console: { debug() {}, error() {} },
     Node: { ELEMENT_NODE: 1 },
     structuredClone,
@@ -141,7 +150,8 @@ function clipboardContext({ clip, host = 'fgt-a.test', confirmAnswer = false }) 
       composedPath: () => [{ nodeType: 1 }],
     });
   const menuButton = (label) => root.querySelector('menu ctx-menu').children.find((b) => b.children[0].textContent.startsWith(label));
-  return { rightClick, menuButton, requests, confirms, tableLookups: () => tableLookups };
+  const menu = () => root.querySelector('menu ctx-menu');
+  return { rightClick, menuButton, menu, host: uiHost, rootListeners, documentListeners, requests, confirms, tableLookups: () => tableLookups };
 }
 
 const clip = (host) => ({ table: 'firewall policy', id: 3, host, policy: { policyid: 3, name: 'p' }, time: 0 });
@@ -175,4 +185,18 @@ test('pasting on the same host proceeds without a prompt', async () => {
   await flush();
   assert.equal(c.confirms.length, 0);
   assert.equal(c.requests.filter((r) => r.method === 'POST').length, 1);
+});
+
+test('fallback menu stays open for presses on its own items inside the closed root', async () => {
+  const c = clipboardContext({ clip: null });
+  await c.rightClick(true);
+  const menu = c.menu();
+  // At document level a press inside the closed root is retargeted to the host.
+  c.documentListeners.mousedown({ composedPath: () => [c.host] });
+  c.rootListeners.mousedown({ composedPath: () => [menu.children[0], menu] });
+  assert.ok(!menu.removed);
+  c.documentListeners.mousedown({ composedPath: () => [{}] });
+  assert.ok(menu.removed);
+  assert.equal(c.documentListeners.mousedown, undefined);
+  assert.equal(c.rootListeners.mousedown, undefined);
 });

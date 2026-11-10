@@ -199,8 +199,12 @@
     const close = () => {
       menu.remove();
       document.removeEventListener('mousedown', onOutside, true);
+      r.removeEventListener('mousedown', onInsideRoot, true);
     };
-    const onOutside = (e) => !e.composedPath().includes(menu) && close();
+    // The UI lives in a closed shadow root: document listeners only see its host, so
+    // presses inside FortiPlug's UI are handled by a listener on the root itself.
+    const onOutside = (e) => !e.composedPath().includes(r.host) && close();
+    const onInsideRoot = (e) => !e.composedPath().includes(menu) && close();
     for (const action of actions) {
       const b = FP.el('button', {}, [FP.el('span', { textContent: action.label })]);
       b.onclick = (e) => {
@@ -211,6 +215,7 @@
       menu.append(b);
     }
     document.addEventListener('mousedown', onOutside, true);
+    r.addEventListener('mousedown', onInsideRoot, true);
     r.appendChild(menu);
   };
 
