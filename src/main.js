@@ -31,7 +31,8 @@
   }
 
   // Toolbar popup: list and run features.
-  browser.runtime.onMessage.addListener((msg) => {
+  browser.runtime.onMessage.addListener((msg, sender) => {
+    if (sender?.id !== browser.runtime.id) return;
     if (msg?.type === 'list') {
       const fortigate = activate();
       const features = fortigate
@@ -40,7 +41,7 @@
       return Promise.resolve({ fortigate, features });
     }
     if (msg?.type === 'run') {
-      const f = FP.features.find((x) => x.id === msg.id);
+      const f = activate() && FP.menuFeatures().find((x) => x.id === msg.id);
       if (f) FP.runFeature(f);
       return Promise.resolve(true);
     }

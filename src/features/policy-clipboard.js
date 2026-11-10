@@ -83,6 +83,11 @@
     const clip = await getClipboard();
     if (!clip) throw new Error('Nothing copied yet.');
     if (clip.table !== table) throw new Error(`The copied entry is a ${clip.table}, not a ${table}.`);
+    // A policy copied on another host may be unexpected (or seeded by a non-FortiGate page); ask first.
+    if (clip.host !== location.host &&
+        !confirm(`The copied policy ${clip.id} comes from ${clip.host || 'an unknown host'}, not ${location.host}. Paste it here anyway?`)) {
+      return;
+    }
     const vdom = FP.getVdom();
     const path = apiPath(table);
 
@@ -177,6 +182,7 @@
       clone.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!FP.isTrusted(e)) return;
         closeGuiMenu();
         FP.runFeature({ run: action.run });
       });
@@ -197,7 +203,8 @@
     const onOutside = (e) => !e.composedPath().includes(menu) && close();
     for (const action of actions) {
       const b = FP.el('button', {}, [FP.el('span', { textContent: action.label })]);
-      b.onclick = () => {
+      b.onclick = (e) => {
+        if (!FP.isTrusted(e)) return;
         close();
         FP.runFeature({ run: action.run });
       };
@@ -209,6 +216,7 @@
 
   let lastHandled = 0;
   const onContextMenu = async (event) => {
+    if (!FP.isTrusted(event)) return; // ignore right-clicks synthesised by the page
     if (event.type === 'mousedown' && event.button !== 2) return;
     // A right-click fires both mousedown and contextmenu; handle it once.
     if (event.timeStamp - lastHandled < 500) return;
