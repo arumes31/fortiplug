@@ -247,7 +247,7 @@ Useful helpers: `FP.request` / `FP.requestJson` (REST calls with session + CSRF)
 Run the naming and dialog regression tests with Node.js (no dependencies):
 
 ```sh
-node --test tests/
+node --test tests/*.test.cjs
 ```
 
 Optionally set `FORTIPLUG_POLICY_SAMPLE` to the path of a local CLI policy excerpt to run the additional 43-policy reference check. This reads the file locally; the policy export is not included in the repository.
