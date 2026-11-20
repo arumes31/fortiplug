@@ -28,6 +28,7 @@ Copy the CLI config of filtered policies, copy & paste any policy, bulk-edit int
 | 📑 **Copy / paste any policy** | Copy a policy and paste it above or below another one — also for policies with **multiple interfaces**, where the GUI's own paste is disabled. | Right-click a policy |
 | 🔀 **Bulk edit interfaces** | Replace, add or remove **multiple** source / destination interfaces on many policies at once, with a live old → new preview. | FP button · right-click · `Alt+Shift+I` |
 | ✏️ **Bulk rename policies** | Generate names from interfaces and services, add an optional software name, and review an editable preview. Automatically shortens names to 40 characters. | FP button · right-click |
+| 🛡️ **Check inbound VIP policies** | Audit the current VDOM for the approved scanner exception and inbound block rules. Copy or download CLI for missing coverage and incorrect order. | FP button · toolbar popup |
 | 🩺 **Diagnose** | Shows what FortiPlug detects on the page (columns, IDs, selection, last right-click). | FP button |
 
 All changes go through the FortiGate REST API using **your existing GUI session** — no API token, no stored credentials.
@@ -148,6 +149,14 @@ The copied policy survives page reloads, so you can also paste on **another Fort
 > Interfaces that can't be used in policies — SD-WAN members, zone members, switch ports, aggregate members — are greyed out with the reason. `any` can't be combined with other interfaces.
 
 ---
+
+### 🛡️ Check inbound VIP policies
+
+1. Open **Policy & Objects → Firewall Policy**, then **FP → Check inbound VIP policies**. The audit reads the current VDOM’s complete IPv4 policy table regardless of GUI filters.
+2. Review the findings for each inbound path. FortiPlug identifies WAN ingress from interface roles, SD-WAN membership, and IPv4 default routes. It uses existing enabled VIP or VIP-group policies to identify the destination interface for each VIP or virtual server.
+3. Copy or download the proposed FortiOS CLI and paste it in the audited VDOM. The CLI creates an `ALL` service exception for `G_SecurityScanner` and blocks `eworx-IP-Blocklist`, the Botnet, Hosting, Malicious, Phishing, Proxy, Tor and VPN ISDB entries, and the ISDB scanner entries available on the firewall. New rules target explicit VIPs, with the scanner exception above the denies and the denies above the publishing allow policies.
+
+The audit uses the existing GUI session and only reads firewall configuration. An existing `all`-destination deny with VIP matching covers every published VIP on its interface path when it precedes the publishing allows. If an existing deny can close a gap from its current position, the CLI edits it by ID to re-enable the policy or enable `match-vip` as needed. If an existing wildcard ISDB deny omits entries from the current catalog, the audit lists those entries and the policy ID for review. It also flags unresolved VIP paths and missing source objects. The CLI applies to standard IPv4 policies with policy-based VIPs. Run the check again if the policy IDs or order change before you paste.
 
 ### ✏️ Bulk rename policies
 
