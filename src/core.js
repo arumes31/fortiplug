@@ -161,6 +161,8 @@
     .modal header { padding: 12px 16px; border-bottom: 1px solid #e5e5e5; font-weight: 600; font-size: 15px; }
     .modal .notes { padding: 8px 16px 0; font-size: 12px; color: #8a5300; }
     .modal .notes div { margin-bottom: 4px; }
+    .modal .findings { margin: 8px 16px 0; font-size: 12px; }
+    .modal .findings pre { max-height: 18vh; overflow: auto; white-space: pre-wrap; }
     .modal textarea { margin: 12px 16px; flex: 1; min-height: 300px; resize: vertical; border: 1px solid #ccc;
       border-radius: 4px; padding: 8px; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre; }
     .modal footer { padding: 0 16px 12px; display: flex; gap: 8px; justify-content: flex-end; }
@@ -236,7 +238,7 @@
     if (ms) toastTimer = setTimeout(() => t.remove(), ms);
   };
 
-  FP.showModal = ({ title, text, notes = [], filename }) => {
+  FP.showModal = ({ title, text, notes = [], findings, filename }) => {
     const r = root();
     r.querySelector('.overlay')?.remove();
     const textarea = el('textarea', { value: text, readOnly: true, spellcheck: false });
@@ -264,6 +266,10 @@
       el('div', { className: 'modal' }, [
         el('header', { textContent: title }),
         ...(notes.length ? [el('div', { className: 'notes' }, notes.map((n) => el('div', { textContent: `⚠ ${n}` })))] : []),
+        ...(findings ? [el('details', { className: 'findings' }, [
+          el('summary', { textContent: 'Audit findings' }),
+          el('pre', { textContent: findings }),
+        ])] : []),
         textarea,
         footer,
       ]),
