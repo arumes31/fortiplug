@@ -29,6 +29,7 @@ Copy the CLI config of filtered policies, copy & paste any policy, bulk-edit int
 | 🔀 **Bulk edit interfaces** | Replace, add or remove **multiple** source / destination interfaces on many policies at once, with a live old → new preview. | FP button · right-click · `Alt+Shift+I` |
 | ✏️ **Bulk rename policies** | Generate names from interfaces and services, add an optional software name, and review an editable preview. Automatically shortens names to 40 characters. | FP button · right-click |
 | 🛡️ **Check inbound VIP policies** | Audit the current VDOM for the approved scanner exception and inbound block rules. Copy or download CLI for missing coverage and incorrect order. | FP button · toolbar popup |
+| 🛡️ **Check Outbound Policies** | Audit internal-to-WAN denies for SMB, directory services, threat ISDB destinations and the eworx IP blocklist. Copy or download CLI for gaps. | FP button · toolbar popup |
 | 🩺 **Diagnose** | Shows what FortiPlug detects on the page (columns, IDs, selection, last right-click). | FP button |
 
 All changes go through the FortiGate REST API using **your existing GUI session** — no API token, no stored credentials.
@@ -154,9 +155,15 @@ The copied policy survives page reloads, so you can also paste on **another Fort
 
 1. Open **Policy & Objects → Firewall Policy**, then **FP → Check inbound VIP policies**. The audit reads the current VDOM’s complete IPv4 policy table regardless of GUI filters.
 2. Review the findings for each inbound path. FortiPlug identifies WAN ingress from interface roles, SD-WAN membership, and IPv4 default routes. It uses existing enabled VIP or VIP-group policies to identify the destination interface for each VIP or virtual server.
-3. Copy or download the proposed FortiOS CLI and paste it in the audited VDOM. The CLI creates an `ALL` service exception for `G_SecurityScanner` and blocks `eworx-IP-Blocklist`, the Botnet, Hosting, Malicious, Phishing, Proxy, Tor and VPN ISDB entries, and the ISDB scanner entries available on the firewall. New rules target explicit VIPs, with the scanner exception above the denies and the denies above the publishing allow policies.
+3. Copy or download the proposed FortiOS CLI and paste it in the audited VDOM. The scanner exception targets explicit VIPs. New denies use `dstaddr "all"` and `match-vip enable` to include current and future VIPs on the selected interfaces. They block `eworx-IP-Blocklist`, the Botnet, Hosting, Malicious, Phishing, Proxy, Spam, Tor and VPN ISDB entries, and available ISDB scanner entries. Place future publishing rules below the denies. If an all-destination deny would overtake a scanner exception on the same interface pair, the audit flags the conflict and lists the specific VIPs in that deny.
 
-The audit uses the existing GUI session and only reads firewall configuration. An existing `all`-destination deny with VIP matching covers every published VIP on its interface path when it precedes the publishing allows. If an existing deny can close a gap from its current position, the CLI edits it by ID to re-enable the policy or enable `match-vip` as needed. If an existing wildcard ISDB deny omits entries from the current catalog, the audit lists those entries and the policy ID for review. It also flags unresolved VIP paths and missing source objects. The CLI applies to standard IPv4 policies with policy-based VIPs. Run the check again if the policy IDs or order change before you paste.
+The audit uses the existing GUI session and only reads firewall configuration. Denies in the same category share a multi-interface policy wherever they can use a common position. The CLI can move a narrowly scoped scanner exception above the grouped denies when it crosses no rule that could match the same traffic. The findings explain when grouping requires a split. An existing `all`-destination deny with VIP matching covers every published VIP on its interface path when it precedes the publishing allows. If an existing deny can close a gap from its current position, the CLI edits it by ID to re-enable the policy or enable `match-vip` as needed. If an existing wildcard ISDB deny omits entries from the current catalog, the audit lists those entries and the policy ID for review. It also flags unresolved VIP paths and missing source objects. The CLI applies to standard IPv4 policies with policy-based VIPs. Run the check again if the policy IDs or order change before you paste.
+
+### 🛡️ Check Outbound Policies
+
+1. Open **Policy & Objects → Firewall Policy**, then **FP → Check Outbound Policies**. The audit checks standard IPv4 policies in the current VDOM. It identifies Internet egress from WAN roles, SD-WAN uplinks and IPv4 default routes. It identifies internal interfaces from LAN and DMZ roles and existing outbound policy sources, excluding `ssl.root`.
+2. Review the four outbound deny categories. **SMB** and **Directory** use destination `all`. Directory covers `LDAP_UDP`, `LDAPS`, `LDAP`, `KERBEROS` and `Kerberos Password`. **Threats** uses the configured Botnet, Phishing, Proxy, Spam, Tor and Malicious ISDB destinations. **Blocklist** uses `eworx-IP-Blocklist` as the destination. All four use source `all` on their selected interfaces.
+3. Copy or download the proposed CLI. Compatible gaps share multi-interface policies placed above the relevant outbound allows. A matching disabled deny can be re-enabled in its current position. The findings list missing service, ISDB and address objects. The audit itself is read-only.
 
 ### ✏️ Bulk rename policies
 
@@ -202,6 +209,7 @@ After changing a file, reload the extension in `about:debugging` (or rebuild / r
 | No **FP** button | Reload the FortiGate tab after installing / reloading the extension. Check FortiPlug is enabled in `about:addons`. |
 | *No "ID" column found* | Enable the **ID** column (see [Prepare the policy list](#prepare-the-fortigate-policy-list-once)). |
 | No FortiPlug entries in the right-click menu | ID column visible? Then run **FP → Diagnose** right after the right-click and check the `Last right-click:` line. |
+| 🛡️ **Check Outbound Policies** | Audit internal-to-WAN denies for SMB, directory services, threat ISDB destinations and the eworx IP blocklist. Copy or download CLI for gaps. | FP button · toolbar popup |
 | *No GUI selection detected* in bulk edit | Tick the policies in the dialog. To improve detection, run **Diagnose** with rows selected and open an issue with the `Selected in GUI` / `Row elements` lines. |
 | *entry not found in datasource* | An interface isn't usable in policies on this FortiGate (member of SD-WAN, zone, switch, …). |
 | *Config backup not available* | Your admin profile lacks backup permission; the output was generated from the REST API instead. |

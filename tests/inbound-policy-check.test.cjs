@@ -6,11 +6,15 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '../src/features/inbound-policy-check.js'), 'utf8');
+const source = ['../src/policy-audit.js', '../src/features/inbound-policy-check.js']
+  .map((file) => fs.readFileSync(path.join(__dirname, file), 'utf8')).join('\n');
 const refs = (...values) => values.map((name) => ({ name }));
 const threats = ['Botnet-C&C.Server', 'Hosting-Bulletproof.Hosting', 'Malicious-Malicious.Server',
-  'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Tor-Exit.Node', 'VPN-Anonymous.VPN'];
-const scanners = ['BinaryEdge-Scanner', 'Censys-Scanner', 'Shodan-Scanner'];
+  'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Spam-Spamming.Server', 'Tor-Exit.Node', 'VPN-Anonymous.VPN'];
+const scanners = [
+  'BinaryEdge-Scanner', 'Censys-Scanner', 'Palo.Alto.Networks-Cortex.Xpanse.Scanner',
+  'Shodan-Scanner', 'Tenable-Tenable.io.Cloud.Scanner',
+];
 const entry = (policyid, fields = {}) => ({
   policyid, status: 'enable', action: 'accept', srcintf: refs('virtual-wan-link'), dstintf: refs('VL100'),
   dstaddr: refs('web'), srcaddr: refs('all'), schedule: 'always', service: refs('ALL'), ...fields,
@@ -81,10 +85,12 @@ test('generates four ordered rules for an SD-WAN virtual server and reserves exi
   assert.match(cli, /set dstintf "VL100"/);
   assert.match(cli, /set srcaddr "G_SecurityScanner"\n\s+set dstaddr "web"/);
   assert.match(cli, /set srcaddr "eworx-IP-Blocklist"/);
-  assert.match(cli, /set internet-service-src-name "Botnet-C&C.Server".*"VPN-Anonymous.VPN"/);
-  assert.match(cli, /set internet-service-src-name "BinaryEdge-Scanner" "Censys-Scanner" "Shodan-Scanner"/);
+  assert.match(cli, /set internet-service-src-name "Botnet-C&C.Server".*"Spam-Spamming.Server".*"VPN-Anonymous.VPN"/);
+  assert.ok(cli.includes('set internet-service-src-name ' + scanners.map((name) => '"' + name + '"').join(' ')));
   assert.equal((cli.match(/set match-vip enable/g) || []).length, 3);
-  assert.doesNotMatch(cli, /Microsoft-Azure|set dstaddr "all"/);
+  assert.equal((cli.match(/set dstaddr "all"/g) || []).length, 3);
+  assert.doesNotMatch(cli, /set match-vip-only/);
+  assert.doesNotMatch(cli, /Microsoft-Azure/);
   assert.match(cli, /move 2 before 10\n\s+move 3 before 10\n\s+move 4 before 10\n\s+move 5 before 10/);
   assert.equal(report.filename, 'fortiplug-inbound-vip-branch.conf');
 });
@@ -106,11 +112,139 @@ test('accepts existing wildcard VIP denies, ISDB groups and VIP groups in config
   assert.equal(report.filename, undefined);
 });
 
+test('groups equivalent denies across WAN interfaces, destination interfaces and publish anchors', async () => {
+  const wan = refs('port7', 'virtual-wan-link');
+  const web = { srcintf: wan, dstintf: refs('VL100'), dstaddr: refs('web') };
+  const camera = { srcintf: wan, dstintf: refs('VL900'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/system/interface': [{ name: 'port7', role: 'wan', vdom: 'branch' }],
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [exception(66, web), exception(67, camera), entry(10, web), entry(20, camera)],
+  }));
+  assert.match(report.title, /3 proposed/);
+  assert.equal((report.text.match(/set srcintf "port7" "virtual-wan-link"/g) || []).length, 3);
+  assert.equal((report.text.match(/set dstintf "VL100" "VL900"/g) || []).length, 3);
+  assert.equal((report.text.match(/set dstaddr "all"/g) || []).length, 3);
+  assert.equal((report.text.match(/move \d+ before 10/g) || []).length, 3);
+});
+
+test('groups VL111 and VL128 by moving a scoped scanner exception before the first publishing rule', async () => {
+  const web = { dstintf: refs('VL111') };
+  const camera = { dstintf: refs('VL128'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [exception(66, web), entry(10, web), exception(67, camera), entry(20, camera)],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set dstintf "VL111" "VL128"/g) || []).length, 3);
+  assert.match(report.text, /move 67 before 10\n\s+move 1 before 10\n\s+move 2 before 10\n\s+move 3 before 10/);
+  assert.doesNotMatch(report.text, /set action accept/);
+});
+
+test('groups ISDB denies when one interface already has part of the category covered', async () => {
+  const camera = { dstintf: refs('VL128'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [
+      exception(66), exception(67, camera), isdbBlock(90, threats.slice(0, 1), { dstaddr: refs('web') }),
+      entry(10), entry(20, camera),
+    ],
+  }));
+  assert.match(report.title, /3 proposed/);
+  assert.equal((report.text.match(/set dstintf "VL100" "VL128"/g) || []).length, 3);
+  assert.match(report.text, /set internet-service-src-name "Botnet-C&C.Server".*"VPN-Anonymous.VPN"/);
+});
+
+test('reports separate denies when a shared anchor would require moving a broader scanner exception', async () => {
+  const camera = { dstintf: refs('VL128'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [
+      exception(66), entry(10), exception(67, { ...camera, srcintf: refs('any') }), entry(20, camera),
+    ],
+  }));
+  assert.match(report.title, /6 proposed/);
+  assert.doesNotMatch(report.text, /move 67|set dstintf "VL100" "VL128"/);
+  assert.match(report.notes.join(' '), /Separate denies are needed for Blocklist, Threats, Scanners/);
+});
+
+test('places a proposed scanner exception above the shared deny anchor', async () => {
+  const camera = { dstintf: refs('VL128'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [exception(66), entry(10), entry(20, camera)],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set dstintf "VL100" "VL128"/g) || []).length, 3);
+  assert.match(report.text, /set srcaddr "G_SecurityScanner"\n\s+set dstaddr "camera"/);
+  assert.match(report.text, /move 1 before 10\n\s+move 2 before 10/);
+});
+
+test('keeps denies separate when their interface lists would include a different published VIP path', async () => {
+  const web = { srcintf: refs('virtual-wan-link'), dstintf: refs('VL100'), dstaddr: refs('web') };
+  const camera = { srcintf: refs('port7'), dstintf: refs('VL900'), dstaddr: refs('camera') };
+  const port7Web = { ...web, srcintf: refs('port7') };
+  const report = await audit(fixture({
+    'cmdb/system/interface': [{ name: 'port7', role: 'wan', vdom: 'branch' }],
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [
+      exception(66, web), exception(67, camera), exception(68, port7Web),
+      block(90, { ...port7Web, srcaddr: refs('eworx-IP-Blocklist') }),
+      isdbBlock(91, threats, port7Web), isdbBlock(92, scanners, port7Web),
+      entry(10, web), entry(20, camera), entry(30, port7Web),
+    ],
+  }));
+  assert.match(report.title, /6 proposed/);
+  assert.doesNotMatch(report.text, /set srcintf "virtual-wan-link" "port7"|set dstintf "VL100" "VL900"/);
+});
+
+test('groups WANs with different VIP bindings because wildcard denies reference no VIP objects', async () => {
+  const camera = { srcintf: refs('port7'), dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/system/interface': [{ name: 'port7', role: 'wan', vdom: 'branch' }],
+    'cmdb/firewall/vip': [{ name: 'web', extintf: 'virtual-wan-link' }, { name: 'camera', extintf: 'port7' }],
+    'cmdb/firewall/policy': [exception(66), exception(67, camera), entry(10), entry(20, camera)],
+  }));
+  assert.match(report.title, /3 proposed/);
+  assert.equal((report.text.match(/set srcintf "virtual-wan-link" "port7"/g) || []).length, 3);
+  assert.doesNotMatch(report.text, /set dstaddr "(?:web|camera)"/);
+});
+
+test('keeps an early deny VIP-specific when a later scanner exception shares the interface pair', async () => {
+  const camera = { dstaddr: refs('camera') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'camera'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [exception(66), entry(10), exception(67, { ...camera, srcintf: refs('any') }), entry(20, camera)],
+  }));
+  assert.equal((report.text.match(/set dstaddr "web"/g) || []).length, 3);
+  assert.equal((report.text.match(/set dstaddr "all"/g) || []).length, 3);
+  assert.doesNotMatch(report.text, /set match-vip-only/);
+  assert.match(report.notes.join(' '), /precede a scanner exception/);
+});
+
+test('recognizes wildcard denies for a new port forward added below them', async () => {
+  const future = { dstaddr: refs('new-port-forward') };
+  const report = await audit(fixture({
+    'cmdb/firewall/vip': ['web', 'new-port-forward'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/firewall/policy': [
+      exception(66),
+      block(58, { srcaddr: refs('eworx-IP-Blocklist') }),
+      isdbBlock(57, scanners),
+      isdbBlock(59, threats),
+      entry(10),
+      entry(11, future),
+    ],
+  }));
+  assert.match(report.title, /1 proposed/);
+  assert.match(report.text, /set srcaddr "G_SecurityScanner"\n\s+set dstaddr "new-port-forward"/);
+  assert.doesNotMatch(report.text, /set action deny/);
+});
+
 test('repairs a late exception and partial, disabled and shadowed denies', async () => {
   const report = await audit(fixture({
     'cmdb/firewall/policy': [
       block(90, { srcaddr: refs('eworx-IP-Blocklist'), 'match-vip': 'disable', service: refs('HTTPS') }),
-      isdbBlock(41, [], { dstaddr: refs('web'), 'internet-service-src-id': [{ id: 107 }] }),
+      isdbBlock(41, [], { dstaddr: refs('web'), 'internet-service-src-id': [{ id: 100 + threats.length }] }),
       isdbBlock(50, scanners, { status: 'disable', service: refs('HTTPS') }),
       entry(20),
       exception(8),
@@ -119,7 +253,7 @@ test('repairs a late exception and partial, disabled and shadowed denies', async
   }));
   assert.match(report.text, /move 1 before 41/);
   assert.match(report.text, /move 2 before 20/);
-  assert.match(report.text, /set internet-service-src-name "Censys-Scanner" "Shodan-Scanner"/);
+  assert.ok(report.text.includes('set internet-service-src-name ' + scanners.slice(1).map((name) => '"' + name + '"').join(' ')));
   assert.doesNotMatch(report.text, /BinaryEdge-Scanner/);
 });
 
@@ -130,15 +264,15 @@ test('retains wildcard denies and reports catalog additions without creating per
       exception(66, { ...egress, dstaddr: refs('EX2019_HTTP', 'WEBSHOP-HTTPS') }),
       block(58, { ...egress, 'match-vip': undefined, srcaddr: [{ q_origin_key: 'eworx-IP-Blocklist' }] }),
       isdbBlock(57, scanners.slice(0, 2), egress),
-      isdbBlock(59, threats.filter((name) => !name.startsWith('Hosting-')), egress),
+      isdbBlock(59, threats.filter((name) => !name.startsWith('Hosting-') && name !== 'Spam-Spamming.Server'), egress),
       entry(30, { ...egress, dstaddr: refs('EX2019_HTTP') }),
       entry(40, { ...egress, dstaddr: refs('WEBSHOP-HTTPS') }),
     ],
     'cmdb/firewall/vip': ['EX2019_HTTP', 'WEBSHOP-HTTPS'].map((name) => ({ name, extintf: 'any' })),
   }), 'v7.6.5');
   assert.match(report.title, /0 proposed/);
-  assert.match(report.text, /existing deny #59 omits these ISDB entries: Hosting-Bulletproof.Hosting/);
-  assert.match(report.text, /existing deny #57 omits these ISDB entries: Shodan-Scanner/);
+  assert.match(report.text, /existing deny #59 omits these ISDB entries: Hosting-Bulletproof.Hosting, Spam-Spamming.Server/);
+  assert.match(report.text, /existing deny #57 omits these ISDB entries: Palo\.Alto\.Networks-Cortex\.Xpanse\.Scanner, Shodan-Scanner, Tenable-Tenable\.io\.Cloud\.Scanner/);
   assert.doesNotMatch(report.text, /Blocklist|config firewall policy/);
   assert.equal(report.filename, undefined);
 });
