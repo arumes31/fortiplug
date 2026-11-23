@@ -4,17 +4,13 @@
   const FP = window.FortiPlug;
   const SCANNER = 'G_SecurityScanner';
   const BLOCKLIST = 'eworx-IP-Blocklist';
+  const SPAM_SERVICE = 'Spam-Spamming.Server';
   const THREAT_FAMILIES = ['botnet', 'hosting', 'malicious', 'phishing', 'proxy', 'tor', 'vpn'];
   const threatFamily = (name) => name.toLowerCase().split('-')[0].replace(/^phising$/, 'phishing');
-  const isScanner = (name) => /-scanner(?:$|[.-])/i.test(name);
-  const names = (refs = []) => (Array.isArray(refs) ? refs : [refs])
-    .map((ref) => typeof ref === 'string' ? ref : ref?.name ?? ref?.['interface-name'] ?? ref?.q_origin_key)
-    .filter((name) => typeof name === 'string' && name);
-  const enabled = (entry) => entry.status !== 'disable';
-  const covers = (refs, name) => refs.includes('any') || refs.includes(name);
-  const overlaps = (refs, name) => name === 'any' ? refs.length > 0 : covers(refs, name);
-  const includesBuiltin = (refs, name) => refs.some((ref) => ref.toLowerCase() === name);
-  const isDefaultRoute = (prefix) => /^(0\.0\.0\.0(?:\/0|\/0\.0\.0\.0| 0\.0\.0\.0))$/.test(prefix);
+  const isScanner = (name) => /[.-]scanner(?:$|[.-])/i.test(name);
+  const { names, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
+  const pathKey = (ingress, egress, vip) => JSON.stringify([ingress, egress, vip]);
+  const pairKey = (ingress, egress) => JSON.stringify([ingress, egress]);
 
   function defaultMatchVip(version) {
     const [, major, minor, patch] = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version || '') || [];
@@ -22,37 +18,106 @@
       (Number(minor) > 2 || (Number(minor) === 2 && Number(patch) >= 4)));
   }
 
-  function ingressInterfaces({ interfaces, zones, sdwan, staticRoutes, activeRoutes }) {
-    const policyInterface = new Map();
-    const wan = new Set(interfaces.filter((intf) => intf.role === 'wan').map((intf) => intf.name));
-    for (const zone of zones) {
-      for (const member of names(zone.interface)) policyInterface.set(member, zone.name);
+  function groupDenies(denies, rules, scannerOrder, repairs) {
+    const accepts = rules.filter((rule) => rule.enabled && rule.action === 'accept' &&
+      (rule.vips.size || rule.allDestinations));
+    const groups = new Map();
+    const targeted = new Map();
+
+    function canAdvance(scanner, index) {
+      const { path, rule } = scanner;
+      if (!rule && !scanner.canAdd) return false;
+      if (rule && (!rule.onlyVipDestinations || rule.ingress.length !== 1 || rule.egress.length !== 1 ||
+        rule.ingress[0] !== path.ingress || rule.egress[0] !== path.egress)) return false;
+      const vips = rule?.vips || [path.vip];
+      return !rules.some((other) => (other.enabled || repairs.has(other.id)) &&
+        other.index >= index && other.index < (rule?.index ?? scanner.index) &&
+        covers(other.ingress, path.ingress) && overlaps(other.egress, path.egress) &&
+        (!other.onlyVipDestinations || [...vips].some((vip) => other.vips.has(vip))));
     }
-    if (sdwan?.status === 'enable') {
-      for (const member of (sdwan.members || []).filter(enabled)) {
-        const zone = member.zone || 'virtual-wan-link';
-        policyInterface.set(member.interface, zone);
-        wan.add(zone);
+
+    function combine(proposals) {
+      const latest = proposals.reduce((first, rule) => rule.latest.index < first.index ? rule.latest : first, proposals[0].latest);
+      const ingress = [...new Set(proposals.flatMap((rule) => rule.ingress))];
+      const egress = [...new Set(proposals.flatMap((rule) => rule.egress))];
+      const sources = [...new Set(proposals.flatMap((rule) => rule.sources))].sort();
+      const pairs = new Set(proposals.flatMap((rule) => [...rule.pairs]));
+      if (egress.length > 1 && egress.includes('any')) return null;
+      for (const source of ingress) {
+        for (const destination of egress) {
+          // Combining interface lists can also match the other interface pairs.
+          if (!pairs.has(pairKey(source, destination)) && accepts.some((rule) =>
+            covers(rule.ingress, source) && overlaps(rule.egress, destination))) return null;
+        }
+      }
+      const advance = scannerOrder.filter((scanner) => scanner.index > latest.index &&
+        ingress.includes(scanner.path.ingress) && overlaps(egress, scanner.path.egress));
+      if (advance.some((scanner) => !canAdvance(scanner, latest.index))) return null;
+      return { ...proposals[0], ingress, egress, sources, pairs, latest, advance };
+    }
+
+    for (const deny of denies) {
+      const { ingress, egress, vip } = deny.path;
+      const pair = pairKey(ingress, egress);
+      const key = deny.kind;
+      const proposal = {
+        kind: deny.kind, sources: deny.sources, latest: deny.latest,
+        ingress: [ingress], egress: [egress], pairs: new Set([pair]),
+      };
+      const single = combine([proposal]);
+      if (!single) {
+        const targetKey = JSON.stringify([key, deny.sources, pair, deny.latest.id]);
+        if (!targeted.has(targetKey)) targeted.set(targetKey, {
+          kind: deny.kind, sources: deny.sources, anchor: deny.latest.id, ingress: [ingress], egress: [egress], vips: [],
+        });
+        targeted.get(targetKey).vips.push(vip);
+        continue;
+      }
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(single);
+    }
+
+    const merged = [];
+    const splitKinds = [];
+    for (const group of groups.values()) {
+      const combined = combine(group);
+      if (combined) {
+        merged.push(combined);
+        continue;
+      }
+      const compatible = [];
+      for (const rule of group) {
+        const index = compatible.findIndex((other, index) => {
+          const pair = combine([other, rule]);
+          if (!pair) return false;
+          compatible[index] = pair;
+          return true;
+        });
+        if (index === -1) compatible.push(rule);
+      }
+      if (compatible.length > 1) splitKinds.push(group[0].kind);
+      merged.push(...compatible);
+    }
+    const scannerAnchors = new Map();
+    const scannerMoves = new Map();
+    for (const deny of merged) {
+      for (const scanner of deny.advance) {
+        const moves = scanner.rule ? scannerMoves : scannerAnchors;
+        const key = scanner.rule?.id ?? scanner.key;
+        if (!moves.has(key) || moves.get(key).index > deny.latest.index) moves.set(key, deny.latest);
       }
     }
-    for (const route of staticRoutes.filter(enabled)) {
-      if (route.blackhole === 'enable' || names(route.dstaddr).length || route['internet-service'] === 'enable' ||
-        names(route['internet-service-name']).length || !isDefaultRoute(route.dst ?? '0.0.0.0 0.0.0.0')) continue;
-      for (const intf of [...names(route.device), ...names(route['sdwan-zone'])]) wan.add(intf);
-    }
-    for (const route of activeRoutes) {
-      if (!isDefaultRoute(route.ip_mask ?? route.dst)) continue;
-      for (const intf of names(route.interface)) wan.add(intf);
-    }
     return {
-      wan: [...new Set([...wan].map((intf) => policyInterface.get(intf) || intf))].filter(Boolean).sort(),
-      normalize: (intf) => policyInterface.get(intf) || intf,
+      wildcard: merged.map((group) => ({ ...group, anchor: group.latest.id, vips: ['all'] })),
+      targeted: [...targeted.values()],
+      scannerAnchors, scannerMoves, splitKinds,
     };
   }
 
+
   function policyChanges(data) {
     const { policies, vips, vipGroups, inventory, groupMembers, isdb, isdbGroups } = data;
-    const { wan, normalize } = ingressInterfaces(data);
+    const { wan, normalize } = wanInterfaces(data);
     const vipNames = new Set(vips.map((vip) => vip.name));
     const groups = new Map(vipGroups.map((group) => [group.name, names(group.member)]));
     const expandVips = (destinations) => new Set(destinations.flatMap((name) => groups.get(name) || name)
@@ -70,7 +135,10 @@
     const threatNames = THREAT_FAMILIES.map((family) => [...catalog].filter((name) => threatFamily(name) === family));
     const scannerNames = [...catalog].filter(isScanner);
     const missingFamilies = THREAT_FAMILIES.filter((_, index) => !threatNames[index].length);
-    const isThreat = (name) => THREAT_FAMILIES.includes(threatFamily(name));
+    const requiredThreats = threatNames.flat();
+    if (catalog.has(SPAM_SERVICE)) requiredThreats.push(SPAM_SERVICE);
+    else missingFamilies.push('spam');
+    const isThreat = (name) => name === SPAM_SERVICE || THREAT_FAMILIES.includes(threatFamily(name));
     const matchVipByDefault = defaultMatchVip(data.policyVersion);
 
     const rules = policies.map((p, index) => {
@@ -81,7 +149,7 @@
       const named = names(p['internet-service-src-name']);
       const ids = (p['internet-service-src-id'] || []).map((ref) => String(ref.id ?? ref));
       const allDestinations = !dstIsdb && includesBuiltin(dst, 'all') && p['dstaddr-negate'] !== 'enable';
-      const matchesVip = p['match-vip-only'] === 'enable' || p['match-vip'] === 'enable' ||
+      const matchesVip = p['match-vip'] === 'enable' ||
         (p.action === 'deny' && p['match-vip'] == null && matchVipByDefault);
       return {
         id: Number(p.policyid), index, srcIsdb, action: p.action, enabled: enabled(p),
@@ -89,6 +157,8 @@
         vips: dstIsdb || p['dstaddr-negate'] === 'enable' ? new Set() : expandVips(dst),
         allVips: allDestinations && matchesVip,
         allDestinations,
+        onlyVipDestinations: !dstIsdb && p['dstaddr-negate'] !== 'enable' && dst.length > 0 &&
+          dst.every((name) => vipNames.has(name) || groups.has(name)),
         always: p.schedule === 'always' && includesBuiltin(names(p.service), 'all') &&
           p['service-negate'] !== 'enable' &&
           p[srcIsdb ? 'internet-service-src-negate' : 'srcaddr-negate'] !== 'enable' &&
@@ -107,8 +177,11 @@
     const paths = new Map();
     const unresolved = [];
     const published = new Set();
+    const vipBindings = new Map(vips.map((vip) => [
+      vip.name, names(vip.extintf).filter((name) => name !== 'any').map(normalize),
+    ]));
     for (const vip of vips.filter(enabled)) {
-      const bindings = names(vip.extintf).filter((name) => name !== 'any').map(normalize);
+      const bindings = vipBindings.get(vip.name);
       const filters = names(vip['srcintf-filter']).filter((name) => name !== 'any').map(normalize);
       const candidates = wan.filter((name) =>
         (!bindings.length || bindings.includes(name)) && (!filters.length || filters.includes(name)));
@@ -117,7 +190,7 @@
         if (!rule.enabled || rule.action !== 'accept' || !rule.vips.has(vip.name)) continue;
         for (const ingress of candidates.filter((name) => covers(rule.ingress, name))) {
           for (const egress of rule.egress) {
-            const key = JSON.stringify([ingress, egress, vip.name]);
+            const key = pathKey(ingress, egress, vip.name);
             paths.set(key, { ingress, egress, vip: vip.name });
             if (!rule.allowScanner) published.add(key);
             found = true;
@@ -129,7 +202,9 @@
 
     const notes = [];
     const details = [];
-    const planned = new Map();
+    const scannerAllows = new Map();
+    const newDenies = [];
+    const scannerOrder = [];
     if (!wan.length && vips.some(enabled)) notes.push('No WAN policy interface was found. Check WAN roles, SD-WAN, and default routes.');
     if (unresolved.length) {
       details.push('VIPs without a verified inbound policy path', ...unresolved.map((name) => '  ' + name), '');
@@ -137,10 +212,12 @@
     if (missingFamilies.length) notes.push('ISDB categories unavailable on this firewall: ' + missingFamilies.join(', ') + '.');
     if (!scannerNames.length) notes.push('No scanner entries were found in the firewall’s ISDB catalog.');
 
-    function plan(kind, path, anchor, sources) {
-      const key = JSON.stringify([kind, path.ingress, path.egress, anchor, sources]);
-      if (!planned.has(key)) planned.set(key, { kind, ingress: path.ingress, egress: path.egress, anchor, sources, vips: [] });
-      planned.get(key).vips.push(path.vip);
+    function planScannerAllow(path, anchor) {
+      const key = JSON.stringify([path.ingress, path.egress, anchor]);
+      if (!scannerAllows.has(key)) scannerAllows.set(key, {
+        kind: 'Allow scanner', ingress: [path.ingress], egress: [path.egress], anchor, sources: [SCANNER], vips: [],
+      });
+      scannerAllows.get(key).vips.push(path.vip);
     }
 
     const checks = [...paths].map(([key, path]) => {
@@ -161,7 +238,7 @@
       enableStatus: !rule.enabled,
       enableMatchVip: rule.allDestinations && !rule.allVips,
     });
-    const isdbBaselines = [[threatNames.flat(), isThreat], [scannerNames, isScanner]];
+    const isdbBaselines = [[requiredThreats, isThreat], [scannerNames, isScanner]];
     // Select existing denies first, then evaluate each scanner exception against
     // the resulting policy order, including repairs selected for other VIPs.
     for (const { path, eligible } of checks) {
@@ -200,7 +277,7 @@
       const missing = [];
       if (!effective.some((rule) => rule.blocklist)) missing.push(['Blocklist', [BLOCKLIST], inventory.has(BLOCKLIST)]);
       const coveredIsdb = new Set(effective.filter((rule) => rule.srcIsdb).flatMap((rule) => [...rule.isdbNames]));
-      const threats = threatNames.flat().filter((name) => !coveredIsdb.has(name)).sort();
+      const threats = requiredThreats.filter((name) => !coveredIsdb.has(name)).sort();
       const scanners = scannerNames.filter((name) => !coveredIsdb.has(name)).sort();
       const catalogReview = [];
       for (const [kind, entries, matchesSource] of [
@@ -220,19 +297,23 @@
 
       // A new deny before the first publishing accept can also precede an existing
       // scanner exception. Check allow order against both existing and planned denies.
-      const denyAnchor = firstAccept?.id;
+      const latest = firstAccept || { index: policies.length };
       const allowAnchor = [denies[0], missing.some(([, , available]) => available) && firstAccept]
         .filter(Boolean).sort((a, b) => a.index - b.index)[0];
-      const scannerAllowed = relevant.some((rule) => rule.allowScanner && rule.always &&
+      const scannerAllow = relevant.find((rule) => rule.allowScanner && rule.always &&
         rule.vips.has(path.vip) && covers(rule.egress, path.egress) &&
         (!allowAnchor || rule.index < allowAnchor.index));
-      if (!scannerAllowed) missing.unshift(['Allow scanner', [SCANNER], inventory.has(SCANNER) && published.has(key)]);
+      const canAddScanner = inventory.has(SCANNER) && published.has(key);
+      if (!scannerAllow) missing.unshift(['Allow scanner', [SCANNER], canAddScanner]);
+      const earliest = scannerAllow ? scannerAllow.index + 1 : canAddScanner ? allowAnchor?.index ?? 0 : latest.index;
+      scannerOrder.push({ key, path, index: earliest, rule: scannerAllow, canAdd: canAddScanner, anchor: allowAnchor?.id });
 
       if (!missing.length && !catalogReview.length) continue;
       details.push(path.ingress + ' → ' + path.egress + ' / ' + path.vip);
       for (const [kind, sources, available] of missing) {
         details.push('  ' + kind + ' — ' + sources.join(', ') + (available ? '' : ' (requires review)'));
-        if (available) plan(kind, path, kind === 'Allow scanner' ? allowAnchor?.id : denyAnchor, sources);
+        if (!available) continue;
+        if (kind !== 'Allow scanner') newDenies.push({ kind, sources, path, latest });
       }
       details.push(...catalogReview);
       details.push('');
@@ -241,18 +322,29 @@
     for (const name of [BLOCKLIST, SCANNER]) {
       if (paths.size && !inventory.has(name)) notes.push('Required source object unavailable: ' + name + '.');
     }
-    return { changes: [...planned.values()], repairs, details, notes, pathCount: paths.size, unresolvedCount: unresolved.length };
+    const { wildcard, targeted, scannerAnchors, scannerMoves, splitKinds } =
+      groupDenies(newDenies, rules, scannerOrder, repairs);
+    for (const scanner of scannerOrder) {
+      if (!scanner.rule && scanner.canAdd) planScannerAllow(scanner.path, scannerAnchors.get(scanner.key)?.id ?? scanner.anchor);
+    }
+    for (const [id, anchor] of scannerMoves) details.push('Move scanner exception #' + id + ' above policy #' + anchor.id + '.');
+    if (targeted.length) {
+      notes.push('Some denies list specific VIPs because an all-destination rule would precede a scanner exception on the same interface pair.');
+    }
+    if (splitKinds.length) {
+      notes.push('Separate denies are needed for ' + splitKinds.join(', ') +
+        ' because the interfaces or scanner exceptions prevent a shared policy position.');
+    }
+    const changes = [...scannerAllows.values(), ...wildcard, ...targeted];
+    return { changes, repairs, scannerMoves, details, notes, pathCount: paths.size, unresolvedCount: unresolved.length };
   }
 
-  const quote = (value) => '"' + String(value).replace(/[\\"]/g, '\\$&') + '"';
-  const cliList = (values) => values.map(quote).join(' ');
-
-  function renderCli({ changes, repairs }, policies) {
+  function renderCli({ changes, repairs, scannerMoves }, policies) {
     if (!changes.length && !repairs.size) return '';
     const ids = new Set(policies.map((policy) => Number(policy.policyid)));
     const existingNames = new Set(policies.map((policy) => policy.name));
     const lines = ['config firewall policy'];
-    const moves = [];
+    const moves = [...scannerMoves].map(([id, anchor]) => '    move ' + id + ' before ' + anchor.id);
     let id = 1;
     // When an allow and a deny share an anchor, moving the allow first keeps it above the deny.
     const ordered = [...changes].sort((a, b) => Number(b.kind === 'Allow scanner') - Number(a.kind === 'Allow scanner'));
@@ -264,8 +356,8 @@
       lines.push(
         '    edit ' + id,
         '        set name ' + quote(stem + id),
-        '        set srcintf ' + quote(rule.ingress),
-        '        set dstintf ' + quote(rule.egress),
+        '        set srcintf ' + cliList(rule.ingress),
+        '        set dstintf ' + cliList(rule.egress),
         '        set action ' + (allow ? 'accept' : 'deny'),
         ...(isdb ? ['        set internet-service-src enable',
           '        set internet-service-src-name ' + cliList(rule.sources)] :
@@ -290,28 +382,6 @@
     return [...lines, 'end', ''].join('\n');
   }
 
-  async function readTable(path, vdom, singleton = false) {
-    const results = [];
-    let start = 0;
-    while (true) {
-      const response = await FP.requestJson('/api/v2/' + path, { vdom, params: start ? { start } : {} });
-      const data = response.results;
-      if (response.status !== 'success' || (singleton ? !data || typeof data !== 'object' : !Array.isArray(data))) {
-        throw new Error('Unexpected response from ' + path);
-      }
-      if (singleton) return { data: Array.isArray(data) ? data[0] || {} : data };
-      results.push(...data);
-      if (!response.limit_reached && !(Number(response.matched_count) > results.length)) {
-        return { data: results, version: response.version };
-      }
-      const next = Number(response.next_idx);
-      if (!data.length || !Number.isSafeInteger(next) || next <= start) {
-        throw new Error('Incomplete response from ' + path);
-      }
-      start = next;
-    }
-  }
-
   async function run() {
     const vdom = FP.getVdom();
     const title = 'Inbound VIP policy check · ' + (vdom || 'root');
@@ -332,15 +402,7 @@
       ['isdb', 'cmdb/firewall/internet-service-name'],
       ['isdbGroups', 'cmdb/firewall/internet-service-group'],
     ];
-    const responses = await Promise.allSettled(requests.map(([, path, singleton]) => readTable(path, vdom, singleton)));
-    const data = {};
-    const failures = new Map();
-    for (const [index, [key, path]] of requests.entries()) {
-      const response = responses[index];
-      data[key] = response.status === 'fulfilled' ? response.value.data : [];
-      if (key === 'policies' && response.status === 'fulfilled') data.policyVersion = response.value.version;
-      if (response.status === 'rejected') failures.set(key, path);
-    }
+    const { data, failures } = await readConfiguration(requests, vdom);
     const required = ['policies', 'vips', 'vipGroups', 'settings', 'zones', 'sdwan'];
     if (required.some((key) => failures.has(key))) {
       throw new Error('Could not read required configuration — ' + required.filter((key) => failures.has(key))
@@ -371,7 +433,7 @@
     if (failures.size) notes.push('Some data could not be read: ' + [...failures.values()].join(', ') + '.');
     const text = cli || findings || (report.pathCount ? 'No missing rules found for the available data.' : 'No inbound VIP paths verified.');
     FP.showModal({
-      title: title + ' · ' + (report.changes.length + report.repairs.size) + ' proposed change(s)',
+      title: title + ' · ' + (report.changes.length + report.repairs.size + report.scannerMoves.size) + ' proposed change(s)',
       text,
       notes: [summary, ...notes, ...(cli ? ['Use this CLI in the audited VDOM with the policy order and IDs shown at audit time.'] : [])],
       findings: cli ? findings : undefined,
