@@ -8,7 +8,7 @@
   const THREAT_FAMILIES = ['botnet', 'hosting', 'malicious', 'phishing', 'proxy', 'tor', 'vpn'];
   const threatFamily = (name) => name.toLowerCase().split('-')[0].replace(/^phising$/, 'phishing');
   const isScanner = (name) => /[.-]scanner(?:$|[.-])/i.test(name);
-  const { names, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
+  const { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
   const pathKey = (ingress, egress, vip) => JSON.stringify([ingress, egress, vip]);
   const pairKey = (ingress, egress) => JSON.stringify([ingress, egress]);
 
@@ -32,7 +32,7 @@
       const vips = rule?.vips || [path.vip];
       return !rules.some((other) => (other.enabled || repairs.has(other.id)) &&
         other.index >= index && other.index < (rule?.index ?? scanner.index) &&
-        covers(other.ingress, path.ingress) && overlaps(other.egress, path.egress) &&
+        covers(other.ingressScope, path.ingress) && overlaps(other.egressScope, path.egress) &&
         (!other.onlyVipDestinations || [...vips].some((vip) => other.vips.has(vip))));
     }
 
@@ -47,7 +47,7 @@
         for (const destination of egress) {
           // Combining interface lists can also match the other interface pairs.
           if (!pairs.has(pairKey(source, destination)) && accepts.some((rule) =>
-            covers(rule.ingress, source) && overlaps(rule.egress, destination))) return null;
+            covers(rule.ingressScope, source) && overlaps(rule.egressScope, destination))) return null;
         }
       }
       const advance = scannerOrder.filter((scanner) => scanner.index > latest.index &&
@@ -117,7 +117,7 @@
 
   function policyChanges(data) {
     const { policies, vips, vipGroups, inventory, groupMembers, isdb, isdbGroups } = data;
-    const { wan, normalize } = wanInterfaces(data);
+    const { wan, normalize, policyInterfaces } = wanInterfaces(data);
     const vipNames = new Set(vips.map((vip) => vip.name));
     const groups = new Map(vipGroups.map((group) => [group.name, names(group.member)]));
     const expandVips = (destinations) => new Set(destinations.flatMap((name) => groups.get(name) || name)
@@ -153,7 +153,8 @@
         (p.action === 'deny' && p['match-vip'] == null && matchVipByDefault);
       return {
         id: Number(p.policyid), index, srcIsdb, action: p.action, enabled: enabled(p),
-        ingress: names(p.srcintf), egress: names(p.dstintf),
+        ingress: interfaceNames(p.srcintf), egress: interfaceNames(p.dstintf),
+        ingressScope: policyInterfaces(p.srcintf), egressScope: policyInterfaces(p.dstintf),
         vips: dstIsdb || p['dstaddr-negate'] === 'enable' ? new Set() : expandVips(dst),
         allVips: allDestinations && matchesVip,
         allDestinations,
@@ -178,18 +179,18 @@
     const unresolved = [];
     const published = new Set();
     const vipBindings = new Map(vips.map((vip) => [
-      vip.name, names(vip.extintf).filter((name) => name !== 'any').map(normalize),
+      vip.name, interfaceNames(vip.extintf).filter((name) => name !== 'any').map(normalize),
     ]));
     for (const vip of vips.filter(enabled)) {
       const bindings = vipBindings.get(vip.name);
-      const filters = names(vip['srcintf-filter']).filter((name) => name !== 'any').map(normalize);
+      const filters = interfaceNames(vip['srcintf-filter']).filter((name) => name !== 'any').map(normalize);
       const candidates = wan.filter((name) =>
         (!bindings.length || bindings.includes(name)) && (!filters.length || filters.includes(name)));
       let found = false;
       for (const rule of rules) {
         if (!rule.enabled || rule.action !== 'accept' || !rule.vips.has(vip.name)) continue;
-        for (const ingress of candidates.filter((name) => covers(rule.ingress, name))) {
-          for (const egress of rule.egress) {
+        for (const ingress of candidates.filter((name) => covers(rule.ingressScope, name))) {
+          for (const egress of rule.egressScope) {
             const key = pathKey(ingress, egress, vip.name);
             paths.set(key, { ingress, egress, vip: vip.name });
             if (!rule.allowScanner) published.add(key);
@@ -222,22 +223,27 @@
 
     const checks = [...paths].map(([key, path]) => {
       const scoped = rules.filter((rule) =>
-        covers(rule.ingress, path.ingress) && overlaps(rule.egress, path.egress));
+        covers(rule.ingressScope, path.ingress) && overlaps(rule.egressScope, path.egress));
       const firstAccept = scoped.find((rule) => rule.enabled && rule.action === 'accept' && !rule.allowScanner &&
         (rule.vips.has(path.vip) || rule.allVips));
       const eligible = scoped.filter((rule) => rule.action === 'deny' && rule.always &&
-        covers(rule.egress, path.egress) && (!firstAccept || rule.index < firstAccept.index));
+        covers(rule.ingress, path.ingress) && covers(rule.egress, path.egress) &&
+        (!firstAccept || rule.index < firstAccept.index));
       return { key, path, scoped, firstAccept, eligible };
     });
     const repairs = new Map();
     const wildcardCoverage = (rule) => rule.allVips || repairs.get(rule.id)?.enableMatchVip;
     const coverage = (rule, vip) => (rule.enabled || repairs.has(rule.id)) &&
       (rule.vips.has(vip) || wildcardCoverage(rule));
-    const planRepair = (rule) => repairs.set(rule.id, {
-      id: rule.id,
-      enableStatus: !rule.enabled,
-      enableMatchVip: rule.allDestinations && !rule.allVips,
-    });
+    function planRepair(rule) {
+      if (!repairs.has(rule.id)) repairs.set(rule.id, {
+        id: rule.id,
+        enableStatus: !rule.enabled,
+        enableMatchVip: rule.allDestinations && !rule.allVips,
+        appendIsdb: new Set(),
+      });
+      return repairs.get(rule.id);
+    }
     const isdbBaselines = [[requiredThreats, isThreat], [scannerNames, isScanner]];
     // Select existing denies first, then evaluate each scanner exception against
     // the resulting policy order, including repairs selected for other VIPs.
@@ -276,7 +282,8 @@
       const effective = eligible.filter((rule) => coverage(rule, path.vip));
       const missing = [];
       if (!effective.some((rule) => rule.blocklist)) missing.push(['Blocklist', [BLOCKLIST], inventory.has(BLOCKLIST)]);
-      const coveredIsdb = new Set(effective.filter((rule) => rule.srcIsdb).flatMap((rule) => [...rule.isdbNames]));
+      const coveredIsdb = new Set(effective.filter((rule) => rule.srcIsdb).flatMap((rule) =>
+        [...rule.isdbNames, ...(repairs.get(rule.id)?.appendIsdb || [])]));
       const threats = requiredThreats.filter((name) => !coveredIsdb.has(name)).sort();
       const scanners = scannerNames.filter((name) => !coveredIsdb.has(name)).sort();
       const catalogReview = [];
@@ -287,7 +294,11 @@
         if (!entries.length) continue;
         const existing = effective.filter((rule) => wildcardCoverage(rule) && rule.srcIsdb &&
           [...rule.isdbNames].some(matchesSource));
-        if (existing.length) {
+        const appendTo = existing.find((rule) => rule.ingress.every((name) => wan.includes(name)));
+        if (appendTo) {
+          const { appendIsdb } = planRepair(appendTo);
+          for (const name of entries) appendIsdb.add(name);
+        } else if (existing.length) {
           catalogReview.push('  ' + kind + ' — existing deny ' + existing.map((rule) => '#' + rule.id).join(', ') +
             ' omits these ISDB entries: ' + entries.join(', '));
         } else {
@@ -301,7 +312,7 @@
       const allowAnchor = [denies[0], missing.some(([, , available]) => available) && firstAccept]
         .filter(Boolean).sort((a, b) => a.index - b.index)[0];
       const scannerAllow = relevant.find((rule) => rule.allowScanner && rule.always &&
-        rule.vips.has(path.vip) && covers(rule.egress, path.egress) &&
+        rule.vips.has(path.vip) && covers(rule.ingress, path.ingress) && covers(rule.egress, path.egress) &&
         (!allowAnchor || rule.index < allowAnchor.index));
       const canAddScanner = inventory.has(SCANNER) && published.has(key);
       if (!scannerAllow) missing.unshift(['Allow scanner', [SCANNER], canAddScanner]);
@@ -317,6 +328,10 @@
       }
       details.push(...catalogReview);
       details.push('');
+    }
+
+    for (const { id, appendIsdb } of repairs.values()) {
+      if (appendIsdb.size) details.push('Policy #' + id + ' — append ISDB sources: ' + [...appendIsdb].sort().join(', '));
     }
 
     for (const name of [BLOCKLIST, SCANNER]) {
@@ -373,9 +388,10 @@
       id++;
     }
     lines.push(...moves);
-    for (const { id, enableStatus, enableMatchVip } of repairs.values()) {
+    for (const { id, enableStatus, enableMatchVip, appendIsdb } of repairs.values()) {
       lines.push('    edit ' + id);
       if (enableMatchVip) lines.push('        set match-vip enable');
+      if (appendIsdb.size) lines.push('        append internet-service-src-name ' + cliList([...appendIsdb].sort()));
       if (enableStatus) lines.push('        set status enable');
       lines.push('    next');
     }

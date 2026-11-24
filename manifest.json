@@ -4,12 +4,13 @@
   "version": "0.3.0",
   "description": "Enhancements for the FortiGate web GUI.",
   "icons": {
-    "48": "icons/icon.svg",
-    "96": "icons/icon.svg"
+    "48": "icons/fortiplug.svg",
+    "96": "icons/fortiplug.svg"
   },
   "permissions": ["clipboardWrite", "storage", "<all_urls>"],
+  "web_accessible_resources": ["icons/fortiplug.svg"],
   "browser_action": {
-    "default_icon": "icons/icon.svg",
+    "default_icon": "icons/fortiplug.svg",
     "default_title": "FortiPlug",
     "default_popup": "popup/popup.html"
   },
@@ -26,6 +27,7 @@
         "src/features/bulk-rename.js",
         "src/features/inbound-policy-check.js",
         "src/features/outbound-policy-check.js",
+        "src/features/dos-policy-check.js",
         "src/main.js"
       ],
       "run_at": "document_idle"

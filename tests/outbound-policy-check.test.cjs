@@ -11,7 +11,7 @@ const source = ['../src/policy-audit.js', '../src/features/outbound-policy-check
 const refs = (...names) => names.map((name) => ({ name }));
 const directory = ['LDAP_UDP', 'LDAPS', 'LDAP', 'KERBEROS', 'Kerberos Password'];
 const threats = [
-  'Botnet-C&C.Server', 'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Spam-Spamming.Server',
+  'Botnet-C&C.Server', 'Hosting-Bulletproof.Hosting', 'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Spam-Spamming.Server',
   'Tor-Exit.Node', 'Tor-Relay.Node', 'Tor-Tor.Node', 'Malicious-Malicious.Server',
 ];
 const blocklist = 'eworx-IP-Blocklist';
@@ -37,7 +37,7 @@ function fixture(overrides = {}) {
     'cmdb/firewall/address': [],
     'cmdb/firewall/addrgrp': [],
     'cmdb/system/external-resource': [{ name: blocklist, type: 'address' }],
-    'cmdb/firewall/internet-service-name': [...threats, 'Hosting-Bulletproof.Hosting'].map((name, id) => ({
+    'cmdb/firewall/internet-service-name': [...threats, 'Microsoft-Azure'].map((name, id) => ({
       name, 'internet-service-id': id + 100, direction: 'both',
     })),
     'cmdb/firewall/internet-service-group': [],
@@ -89,11 +89,11 @@ test('generates the four baselines and groups VLANs, zones and WANs into multi-i
   assert.equal((report.text.match(/set dstintf "port7" "virtual-wan-link"/g) || []).length, 4);
   assert.match(report.text, /set dstaddr "all"\n\s+set service "SMB"/);
   assert.match(report.text, /set service "KERBEROS" "Kerberos Password" "LDAP" "LDAPS" "LDAP_UDP"/);
-  assert.match(report.text, /set internet-service enable\n\s+set internet-service-name .*"Spam-Spamming.Server"/);
+  assert.match(report.text, /set internet-service enable\n\s+set internet-service-name .*"Hosting-Bulletproof.Hosting".*"Spam-Spamming.Server"/);
   assert.match(report.text, /set dstaddr "eworx-IP-Blocklist"\n\s+set service "ALL"/);
   assert.equal((report.text.match(/"Tor-Relay.Node"/g) || []).length, 1);
-  assert.match(report.text, /move 2 before 40\n\s+move 3 before 40\n\s+move 4 before 40\n\s+move 5 before 40/);
-  assert.doesNotMatch(report.text, /Hosting-Bulletproof|internet-service-src|match-vip enable|OTHER|x9/);
+  assert.match(report.text, /move 2 before 1\n\s+move 3 before 1\n\s+move 4 before 1\n\s+move 5 before 1/);
+  assert.doesNotMatch(report.text, /Microsoft-Azure|internet-service-src|set match-vip|OTHER|x9/);
 });
 
 test('counts enabled cover before the accept through service groups, ISDB groups and destination address groups', async () => {
@@ -113,22 +113,39 @@ test('counts enabled cover before the accept through service groups, ISDB groups
   assert.equal(report.text, 'No missing outbound rules found.');
 });
 
-test('re-enables a matching deny and generates missing coverage for narrow or shadowed rules', async () => {
+test('moves and re-enables matching denies and fills remaining coverage before a narrower deny', async () => {
   const report = await audit(fixture({
     'cmdb/firewall/policy': [
       deny(55, { status: 'disable', service: refs('SMB') }),
       deny(56, { srcaddr: refs('LAN_Internal-Server'), dstaddr: refs(blocklist) }),
-      deny(57, { 'internet-service': 'enable', 'internet-service-name': refs(...threats.slice(1)) }),
+      deny(57, { 'internet-service': 'enable',
+        'internet-service-name': refs(...threats.filter((name) => name !== 'Hosting-Bulletproof.Hosting')) }),
       rule(40),
-      deny(58, { service: refs(...directory) }),
+      deny(58, { status: 'disable', service: refs(...directory) }),
     ],
   }));
-  assert.match(report.title, /4 proposed/);
+  assert.match(report.title, /5 proposed/);
   assert.match(report.text, /edit 55\n\s+set status enable/);
-  assert.doesNotMatch(report.text, /FP-Outbound-SMB|edit 56|edit 58/);
-  assert.match(report.text, /set internet-service-name "Botnet-C&C.Server"\n/);
+  assert.doesNotMatch(report.text, /FP-Outbound-SMB|FP-Outbound-Directory|edit 56/);
+  assert.match(report.text, /set internet-service-name "Hosting-Bulletproof.Hosting"\n/);
   assert.match(report.text, /set dstaddr "eworx-IP-Blocklist"/);
-  assert.match(report.text, /move 1 before 40/);
+  assert.match(report.text, /move 57 before 56\n\s+move 58 before 56\n\s+move 1 before 56\n\s+move 2 before 56/);
+  assert.match(report.text, /edit 58\n\s+set status enable/);
+});
+
+test('emits move-only CLI for existing outbound blocks below the first policy on their interface pair', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [
+      rule(70, { srcintf: refs('virtual-wan-link'), dstintf: refs('VL100') }),
+      deny(75, { service: refs('SMB'), srcaddr: refs('OneHost') }),
+      deny(50, { service: refs('SMB', ...directory) }),
+      deny(51, { 'internet-service': 'enable', 'internet-service-name': refs(...threats) }),
+      deny(52, { dstaddr: refs(blocklist) }),
+      rule(40),
+    ],
+  }));
+  assert.match(report.title, /3 proposed/);
+  assert.equal(report.text, 'config firewall policy\n    move 50 before 75\n    move 51 before 75\n    move 52 before 75\nend\n');
 });
 
 test('separates WANs with different source gaps to avoid crossing already covered interface pairs', async () => {
@@ -174,6 +191,52 @@ test('excludes ssl.root even when it has a LAN role and an outbound allow', asyn
   assert.match(report.notes.join(' '), /1 internal-to-WAN interface pair/);
   assert.equal((report.text.match(/set srcintf "VL100"/g) || []).length, 4);
   assert.doesNotMatch(report.text + report.findings, /ssl\.root|before 30/);
+});
+
+test('groups WAN zone members into one INTERNET destination and uses existing zone rules for ordering', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/interface': [
+      { name: 'VL100', role: 'lan' }, { name: 'wan1', role: 'wan' }, { name: 'wan2', role: 'wan' },
+    ],
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/system/zone': [{ name: 'INTERNET', interface: [
+      { name: 'A1', 'interface-name': 'wan1' }, { name: 'A2', 'interface-name': 'wan2' },
+    ] }],
+    'cmdb/firewall/policy': [rule(40, { dstintf: refs('INTERNET') })],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set dstintf "INTERNET"/g) || []).length, 4);
+  assert.equal((report.text.match(/move \d+ before 40/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /set dstintf "wan[12]"/);
+});
+
+test('uses zone-only outbound policies even when the input policies still reference member ports', async () => {
+  const members = { srcintf: refs('VL100'), dstintf: refs('port7') };
+  const report = await audit(fixture({
+    'cmdb/system/interface': [],
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/router/static': [{ dst: '0.0.0.0/0', device: 'port7' }],
+    'cmdb/system/zone': [
+      { name: 'INTERNET', interface: refs('port7') }, { name: 'SERVERS', interface: refs('VL100') },
+    ],
+    'cmdb/firewall/policy': [deny(39, { ...members, service: refs('SMB') }), rule(40, members)],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set srcintf "SERVERS"\n\s+set dstintf "INTERNET"/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /"port7"|"VL100"|edit 39\b/);
+});
+
+test('groups a WAN zone with a standalone WAN without including the zone member', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/interface': [
+      { name: 'VL100', role: 'lan' }, { name: 'wan1', role: 'wan' }, { name: 'wan2', role: 'wan' },
+    ],
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/system/zone': [{ name: 'INTERNET', interface: refs('wan1') }],
+    'cmdb/firewall/policy': [rule(40, { dstintf: refs('INTERNET', 'wan2') })],
+  }));
+  assert.equal((report.text.match(/set dstintf "INTERNET" "wan2"/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /"wan1"/);
 });
 
 test('lists missing service and destination objects and omits unresolved references from CLI', async () => {

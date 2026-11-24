@@ -5,6 +5,8 @@
   const names = (refs = []) => (Array.isArray(refs) ? refs : [refs])
     .map((ref) => typeof ref === 'string' ? ref : ref?.name ?? ref?.['interface-name'] ?? ref?.q_origin_key)
     .filter((name) => typeof name === 'string' && name);
+  const interfaceNames = (refs) => names((Array.isArray(refs) ? refs : [refs])
+    .map((ref) => ref?.['interface-name'] || ref?.q_origin_key || ref));
   const enabled = (entry) => entry.status !== 'disable';
   const covers = (refs, name) => refs.includes('any') || refs.includes(name);
   const overlaps = (refs, name) => name === 'any' ? refs.length > 0 : covers(refs, name);
@@ -13,35 +15,41 @@
 
   function wanInterfaces({ interfaces, zones, sdwan, staticRoutes, activeRoutes }, { externalOnly = false } = {}) {
     const policyInterface = new Map();
+    const systemZones = new Set();
     const wan = new Set(interfaces.filter((intf) => intf.role === 'wan').map((intf) => intf.name));
     const devices = new Map(interfaces.map((intf) => [intf.name, intf]));
     for (const zone of zones) {
-      for (const member of names(zone.interface)) policyInterface.set(member, zone.name);
+      const [zoneName] = names(zone);
+      if (!zoneName) continue;
+      systemZones.add(zoneName);
+      for (const member of interfaceNames(zone.interface)) policyInterface.set(member, zoneName);
     }
     if (sdwan?.status === 'enable') {
-      for (const member of (sdwan.members || []).filter(enabled)) {
-        const zone = member.zone || 'virtual-wan-link';
-        policyInterface.set(member.interface, zone);
-        const device = devices.get(member.interface);
+      for (const member of sdwan.members || []) {
+        const [intf] = interfaceNames(member.interface);
+        if (!intf) continue;
+        const zone = policyInterface.get(intf) || interfaceNames(member.zone)[0] || 'virtual-wan-link';
+        policyInterface.set(intf, zone);
+        const device = devices.get(intf);
         const uplink = device?.role === 'wan' || (!['lan', 'dmz'].includes(device?.role) &&
           (['physical', 'aggregate', 'vlan', 'pppoe'].includes(device?.type) ||
             (zone === 'virtual-wan-link' && !device?.type)));
-        if (!externalOnly || uplink) wan.add(zone);
+        if (enabled(member) && (!externalOnly || uplink)) wan.add(zone);
       }
     }
     for (const route of staticRoutes.filter(enabled)) {
       if (route.blackhole === 'enable' || names(route.dstaddr).length || route['internet-service'] === 'enable' ||
         names(route['internet-service-name']).length || !isDefaultRoute(route.dst ?? '0.0.0.0 0.0.0.0')) continue;
-      for (const intf of [...names(route.device), ...names(route['sdwan-zone'])]) wan.add(intf);
+      for (const intf of [...interfaceNames(route.device), ...interfaceNames(route['sdwan-zone'])]) wan.add(intf);
     }
     for (const route of activeRoutes) {
       if (!isDefaultRoute(route.ip_mask ?? route.dst)) continue;
-      for (const intf of names(route.interface)) wan.add(intf);
+      for (const intf of interfaceNames(route.interface)) wan.add(intf);
     }
-    return {
-      wan: [...new Set([...wan].map((intf) => policyInterface.get(intf) || intf))].filter(Boolean).sort(),
-      normalize: (intf) => policyInterface.get(intf) || intf,
-    };
+    const normalize = (intf) => policyInterface.get(intf) || intf;
+    const policyInterfaces = (refs) => [...new Set(interfaceNames(refs).map(normalize))];
+    const targets = [...new Set([...wan].map(normalize))].filter(Boolean).sort();
+    return { wan: targets, wanZoneNames: targets.filter((intf) => systemZones.has(intf)), normalize, policyInterfaces };
   }
 
   const quote = (value) => '"' + String(value).replace(/[\\"]/g, '\\$&') + '"';
@@ -82,5 +90,5 @@
     return { data, failures };
   }
 
-  FP.policyAudit = { names, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration };
+  FP.policyAudit = { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration };
 })();
