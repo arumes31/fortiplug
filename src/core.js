@@ -138,9 +138,10 @@
     :host { all: initial; }
     * { box-sizing: border-box; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
     .launcher { position: fixed; right: 16px; bottom: 16px; width: 36px; height: 36px; border-radius: 50%;
-      border: none; background: #c8102e; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer;
+      display: grid; place-items: center; padding: 0; border: none; background: #fff; cursor: pointer;
       box-shadow: 0 2px 8px rgba(0,0,0,.3); opacity: .75; transition: opacity .15s; }
     .launcher:hover, .launcher.open { opacity: 1; }
+    .launcher img { display: block; width: 32px; height: 32px; pointer-events: none; }
     .launcher.busy { animation: pulse 1s infinite; }
     @keyframes pulse { 50% { opacity: .4; } }
     .menu { position: fixed; right: 16px; bottom: 60px; min-width: 260px; background: #fff; color: #222;
@@ -301,7 +302,9 @@
 
   FP.mountLauncher = () => {
     const r = root();
-    const launcher = el('button', { className: 'launcher', textContent: 'FP', title: 'FortiPlug' });
+    const logo = el('img', { src: browser.runtime.getURL('icons/fortiplug.svg'), alt: '', draggable: false });
+    const launcher = el('button', { className: 'launcher', type: 'button', title: 'FortiPlug' }, [logo]);
+    launcher.setAttribute('aria-label', 'FortiPlug');
     let menu = null;
     const closeMenu = () => {
       menu?.remove();

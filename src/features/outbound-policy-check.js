@@ -2,14 +2,14 @@
 
 (() => {
   const FP = window.FortiPlug;
-  const { names, enabled, covers, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
+  const { names, interfaceNames, enabled, covers, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
   const BLOCKLIST = 'eworx-IP-Blocklist';
   const SSL_VPN_INTERFACE = 'ssl.root';
   const BASELINES = [
     { kind: 'SMB', values: ['SMB'] },
     { kind: 'Directory', values: ['LDAP_UDP', 'LDAPS', 'LDAP', 'KERBEROS', 'Kerberos Password'] },
     { kind: 'Threats', values: [
-      'Botnet-C&C.Server', 'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Spam-Spamming.Server',
+      'Botnet-C&C.Server', 'Hosting-Bulletproof.Hosting', 'Phishing-Phishing.Server', 'Proxy-Proxy.Server', 'Spam-Spamming.Server',
       'Tor-Exit.Node', 'Tor-Relay.Node', 'Tor-Tor.Node', 'Malicious-Malicious.Server',
     ] },
     { kind: 'Blocklist', values: [BLOCKLIST] },
@@ -25,7 +25,7 @@
     });
   }
 
-  function internalSources(data, wan, normalize) {
+  function internalSources(data, wan, normalize, policyInterfaces) {
     const memberOf = new Map();
     for (const entry of [...data.interfaces, ...data.softwareSwitches]) {
       for (const member of names(entry.member)) memberOf.set(member, entry.name);
@@ -41,16 +41,17 @@
     // Existing explicit outbound rules also identify internal zones and VLANs
     // whose interfaces have no LAN or DMZ role configured.
     for (const policy of data.policies.filter(enabled)) {
-      if (!wan.some((name) => covers(names(policy.dstintf), name))) continue;
-      for (const name of names(policy.srcintf)) internal.add(policyName(name));
+      if (!wan.some((name) => covers(policyInterfaces(policy.dstintf), name))) continue;
+      for (const name of interfaceNames(policy.srcintf)) internal.add(policyName(name));
     }
-    return [...internal].filter((name) => name && name !== 'any' && name !== SSL_VPN_INTERFACE && !wan.includes(name)).sort();
+    return [...internal].filter((name) => name && name !== 'any' &&
+      name !== normalize(SSL_VPN_INTERFACE) && !wan.includes(name)).sort();
   }
 
   function auditOutbound(data) {
-    const { wan: detectedWan, normalize } = wanInterfaces(data, { externalOnly: true });
-    const wan = detectedWan.filter((name) => name !== SSL_VPN_INTERFACE);
-    const internal = internalSources(data, wan, normalize);
+    const { wan: detectedWan, normalize, policyInterfaces } = wanInterfaces(data, { externalOnly: true });
+    const wan = detectedWan.filter((name) => name !== normalize(SSL_VPN_INTERFACE));
+    const internal = internalSources(data, wan, normalize, policyInterfaces);
     const serviceGroups = new Map(data.serviceGroups.map((entry) => [entry.name, entry]));
     const addressGroups = new Map(data.addressGroups.map((entry) => [entry.name, entry]));
     const isdbGroups = new Map(data.isdbGroups.map((entry) => [entry.name, entry]));
@@ -80,8 +81,8 @@
     const requestedServices = new Set(baselines.filter(({ kind }) => serviceKinds.has(kind)).flatMap(({ values }) => values));
     const requestedThreats = new Set(baselines.find(({ kind }) => kind === 'Threats').values);
     const rules = data.policies.map((policy, index) => {
-      const ingress = names(policy.srcintf);
-      const egress = names(policy.dstintf);
+      const ingress = interfaceNames(policy.srcintf);
+      const egress = interfaceNames(policy.dstintf);
       const destination = names(policy.dstaddr);
       const service = groupNames(policy.service, serviceGroups);
       const allServices = includesBuiltin(service, 'all');
@@ -98,6 +99,7 @@
         !policy['fsso-groups']?.length && !policy['src-vendor-mac']?.length && !policy['ztna-ems-tag']?.length &&
         policy['vlan-filter'] !== 'enable';
       const allDestination = includesBuiltin(destination, 'all');
+      const destinationMembers = groupNames(destination, addressGroups);
       const blockedServices = !dstIsdb && policy['dstaddr-negate'] !== 'enable' && policy['service-negate'] !== 'enable';
       const values = new Map();
       if (wideDeny && blockedServices && allDestination) {
@@ -107,7 +109,7 @@
         if (allServices) values.set('Threats', requestedThreats);
       }
       if (wideDeny && blockedServices && allServices &&
-        (allDestination || groupNames(destination, addressGroups).includes(BLOCKLIST))) {
+        (allDestination || destinationMembers.includes(BLOCKLIST))) {
         values.set('Blocklist', new Set([BLOCKLIST]));
       }
       if (wideDeny && dstIsdb && policy['internet-service-negate'] !== 'enable') {
@@ -115,19 +117,24 @@
       }
       const withinScope = ingress.length > 0 && egress.length > 0 &&
         ingress.every((name) => internal.includes(name)) && egress.every((name) => wan.includes(name));
-      // A disabled rule can be restored when all of its selectors belong to the baseline.
+      // Reordering or enabling a rule changes every interface pair it matches.
+      // Only edit existing rules whose interfaces and selectors stay in scope.
       const exactBaseline = dstIsdb ? isdbRefs.length > 0 && isdbRefs.every((name) => requestedThreats.has(name)) &&
         !policy['internet-service-custom']?.length && !policy['internet-service-custom-group']?.length :
         allDestination ? service.length > 0 && service.every((name) => requestedServices.has(name)) :
-          destination.length === 1 && destination[0] === BLOCKLIST && allServices;
-      return { id: Number(policy.policyid), index, ingress, egress, active: enabled(policy), action: policy.action,
-        values, repairable: withinScope && exactBaseline };
+          destinationMembers.length > 0 && destinationMembers.every((name) => name === BLOCKLIST) && allServices;
+      return { id: Number(policy.policyid), index, ingress, egress,
+        ingressScope: policyInterfaces(policy.srcintf), egressScope: policyInterfaces(policy.dstintf),
+        active: enabled(policy), action: policy.action,
+        values, baseline: withinScope && exactBaseline && values.size > 0 };
     });
 
     const paths = wan.flatMap((egress) => internal.map((ingress) => {
-      const scoped = rules.filter((rule) => covers(rule.ingress, ingress) && covers(rule.egress, egress));
-      const anchor = scoped.find((rule) => rule.active && rule.action === 'accept');
-      const eligible = scoped.filter((rule) => rule.action === 'deny' && (!anchor || rule.index < anchor.index));
+      const scoped = rules.filter((rule) => covers(rule.ingressScope, ingress) && covers(rule.egressScope, egress));
+      const anchor = scoped.find((rule) => !rule.baseline);
+      const firstAccept = scoped.find((rule) => rule.active && rule.action === 'accept');
+      const eligible = scoped.filter((rule) => rule.action === 'deny' && covers(rule.ingress, ingress) && covers(rule.egress, egress) &&
+        (rule.baseline || !firstAccept || rule.index < firstAccept.index));
       return { ingress, egress, anchor, eligible };
     }));
     const repairs = new Set();
@@ -137,13 +144,27 @@
       for (const { kind, values } of baselines) {
         for (const name of values) {
           if (hasCoverage(path, kind, name)) continue;
-          const existing = path.eligible.find((rule) => rule.repairable && rule.values.get(kind)?.has(name));
+          const existing = path.eligible.find((rule) => rule.baseline && rule.values.get(kind)?.has(name));
           if (existing) repairs.add(existing.id);
         }
       }
     }
 
+    const earlier = (current, candidate) =>
+      candidate && (!current || candidate.index < current.index) ? candidate : current;
+    const existingMoves = new Map();
+    for (const { anchor, eligible } of paths) {
+      if (!anchor) continue;
+      for (const rule of eligible) {
+        if (rule.baseline && (rule.active || repairs.has(rule.id)) && rule.index > anchor.index) {
+          existingMoves.set(rule.id, earlier(existingMoves.get(rule.id), anchor));
+        }
+      }
+    }
     const details = [...repairs].map((id) => 'Policy #' + id + ' — re-enable outbound deny.');
+    for (const [id, anchor] of existingMoves) {
+      details.push('Policy #' + id + ' — move above policy #' + anchor.id + ' at the start of its outbound paths.');
+    }
     const perWan = new Map();
     for (const path of paths) {
       for (const { kind, values } of baselines) {
@@ -155,7 +176,7 @@
         const group = perWan.get(key);
         group.ingress.push(path.ingress);
         for (const name of missing) group.values.add(name);
-        if (path.anchor && (!group.anchor || path.anchor.index < group.anchor.index)) group.anchor = path.anchor;
+        group.anchor = earlier(group.anchor, path.anchor);
       }
     }
 
@@ -166,17 +187,18 @@
       const combined = changes.get(key);
       combined.egress.push(group.egress);
       for (const name of group.values) combined.values.add(name);
-      if (group.anchor && (!combined.anchor || group.anchor.index < combined.anchor.index)) combined.anchor = group.anchor;
+      combined.anchor = earlier(combined.anchor, group.anchor);
     }
-    return { changes: [...changes.values()], repairs, details, missingObjects, pathCount: paths.length };
+    return { changes: [...changes.values()], repairs, existingMoves, details, missingObjects, pathCount: paths.length };
   }
 
-  function renderCli({ changes, repairs }, policies) {
-    if (!changes.length && !repairs.size) return '';
+  function renderCli({ changes, repairs, existingMoves }, policies) {
+    if (!changes.length && !repairs.size && !existingMoves.size) return '';
     const ids = new Set(policies.map((policy) => Number(policy.policyid)));
     const namesInUse = new Set(policies.map((policy) => policy.name));
     const cli = ['config firewall policy'];
-    const moves = [];
+    const moves = [...ids].filter((id) => existingMoves.has(id))
+      .map((id) => '    move ' + id + ' before ' + existingMoves.get(id).id);
     let id = 1;
     for (const rule of changes) {
       const stem = 'FP-Outbound-' + rule.kind + '-';
@@ -197,7 +219,6 @@
           '        set service ' + cliList(serviceKinds.has(rule.kind) ? values : ['ALL']),
         ]),
         '        set schedule "always"',
-        '        set match-vip disable',
         '        set logtraffic all',
         '    next',
       );
@@ -250,7 +271,7 @@
     if (report.missingObjects.length) notes.push('Required objects unavailable: ' + report.missingObjects.join(', ') + '.');
     if (failures.size) notes.push('Some data could not be read: ' + [...failures.values()].join(', ') + '.');
     FP.showModal({
-      title: title + ' · ' + (report.changes.length + report.repairs.size) + ' proposed change(s)',
+      title: title + ' · ' + (report.changes.length + new Set([...report.repairs, ...report.existingMoves.keys()]).size) + ' proposed change(s)',
       text: cli || findings || (!report.pathCount ? 'No internal-to-WAN paths verified.' :
         report.missingObjects.length || failures.size ? 'No CLI changes available for the objects that could be checked.' :
           'No missing outbound rules found.'),

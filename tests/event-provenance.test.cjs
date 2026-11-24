@@ -20,6 +20,7 @@ class Node {
   }
   append(...c) { this.children.push(...c); }
   appendChild(c) { this.children.push(c); return c; }
+  setAttribute(name, value) { this[name] = value; }
   remove() { this.removed = true; }
   querySelector(selector) {
     const cls = selector.replace(/^\./, '');
@@ -45,7 +46,8 @@ function coreContext() {
     },
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
-  const context = vm.createContext({ window: {}, document, console, location: { origin: 'https://fgt.test' } });
+  const browser = { runtime: { getURL: (file) => 'moz-extension://test/' + file } };
+  const context = vm.createContext({ window: {}, document, browser, console, location: { origin: 'https://fgt.test' } });
   load(context, ['src/core.js']);
   const FP = context.window.FortiPlug;
   let runs = 0;
@@ -76,6 +78,8 @@ test('synthetic keyboard shortcuts are ignored, real ones run the feature', asyn
 test('synthetic launcher and menu clicks are ignored', async () => {
   const c = coreContext();
   const launcher = c.shadow.querySelector('.launcher');
+  assert.equal(launcher['aria-label'], 'FortiPlug');
+  assert.equal(launcher.children[0].src, 'moz-extension://test/icons/fortiplug.svg');
   launcher.onclick({ isTrusted: false });
   assert.equal(c.shadow.querySelector('.menu'), null);
   launcher.onclick({ isTrusted: true });

@@ -257,7 +257,7 @@ test('repairs a late exception and partial, disabled and shadowed denies', async
   assert.doesNotMatch(report.text, /BinaryEdge-Scanner/);
 });
 
-test('retains wildcard denies and reports catalog additions without creating per-VIP copies', async () => {
+test('appends catalog additions to existing wildcard denies without creating per-VIP copies', async () => {
   const egress = { dstintf: refs('_default') };
   const report = await audit(fixture({
     'cmdb/firewall/policy': [
@@ -270,10 +270,42 @@ test('retains wildcard denies and reports catalog additions without creating per
     ],
     'cmdb/firewall/vip': ['EX2019_HTTP', 'WEBSHOP-HTTPS'].map((name) => ({ name, extintf: 'any' })),
   }), 'v7.6.5');
+  assert.match(report.title, /2 proposed/);
+  assert.match(report.text, /edit 59\n\s+append internet-service-src-name "Hosting-Bulletproof.Hosting" "Spam-Spamming.Server"/);
+  assert.match(report.text, /edit 57\n\s+append internet-service-src-name "Palo\.Alto\.Networks-Cortex\.Xpanse\.Scanner" "Shodan-Scanner" "Tenable-Tenable\.io\.Cloud\.Scanner"/);
+  assert.doesNotMatch(report.text, /Blocklist|set internet-service-src-name|set action/);
+  assert.equal(report.filename, 'fortiplug-inbound-vip-branch.conf');
+});
+
+test('appends the VPN object to policy 33 only once for both 3CX VIPs', async () => {
+  const vipNames = ['TCP5001_3CX', 'TCP443_3CX'];
+  const lan = { dstintf: refs('lan') };
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [
+      exception(8, { ...lan, dstaddr: refs(...vipNames) }),
+      block(31, { ...lan, srcaddr: refs('eworx-IP-Blocklist') }),
+      isdbBlock(32, scanners, lan),
+      isdbBlock(33, threats.filter((name) => name !== 'VPN-Anonymous.VPN'), lan),
+      entry(40, { ...lan, dstaddr: refs(...vipNames) }),
+    ],
+    'cmdb/firewall/vip': vipNames.map((name) => ({ name, extintf: 'any' })),
+  }));
+  assert.match(report.title, /1 proposed/);
+  assert.equal(report.text, 'config firewall policy\n    edit 33\n        append internet-service-src-name "VPN-Anonymous.VPN"\n    next\nend\n');
+});
+
+test('reports missing ISDB entries for an any-source-interface deny without editing it', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [
+      exception(8),
+      block(31, { srcaddr: refs('eworx-IP-Blocklist') }),
+      isdbBlock(32, scanners),
+      isdbBlock(33, threats.filter((name) => name !== 'VPN-Anonymous.VPN'), { srcintf: refs('any') }),
+      entry(40),
+    ],
+  }));
   assert.match(report.title, /0 proposed/);
-  assert.match(report.text, /existing deny #59 omits these ISDB entries: Hosting-Bulletproof.Hosting, Spam-Spamming.Server/);
-  assert.match(report.text, /existing deny #57 omits these ISDB entries: Palo\.Alto\.Networks-Cortex\.Xpanse\.Scanner, Shodan-Scanner, Tenable-Tenable\.io\.Cloud\.Scanner/);
-  assert.doesNotMatch(report.text, /Blocklist|config firewall policy/);
+  assert.match(report.text, /existing deny #33 omits these ISDB entries: VPN-Anonymous.VPN/);
   assert.equal(report.filename, undefined);
 });
 
@@ -327,10 +359,11 @@ test('re-enables the wildcard AXIS threat deny once and enables match-vip when n
       'cmdb/firewall/vip': axes.map((name) => ({ name, extintf: 'any' })),
     }));
     const matching = matchVip === 'disable' ? '        set match-vip enable\n' : '';
-    assert.equal(report.text, 'config firewall policy\n    edit 129\n' + matching + '        set status enable\n    next\nend\n');
+    assert.equal(report.text, 'config firewall policy\n    edit 129\n' + matching +
+      '        append internet-service-src-name "VPN-Anonymous.VPN"\n        set status enable\n    next\nend\n');
     assert.match(report.title, /1 proposed/);
     assert.match(report.findings, /Policy #129 — re-enable deny/);
-    assert.match(report.findings, /existing deny #129 omits these ISDB entries: VPN-Anonymous.VPN/);
+    assert.match(report.findings, /Policy #129 — append ISDB sources: VPN-Anonymous.VPN/);
   }
 });
 
@@ -387,6 +420,36 @@ test('uses active default routes and respects VIP source-interface filters', asy
   }));
   assert.match(report.text, /set srcintf "port8"/);
   assert.doesNotMatch(report.text, /port9/);
+});
+
+test('uses the INTERNET zone for WAN routes and VIP bindings on a member port', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [entry(10, { srcintf: refs('INTERNET') })],
+    'cmdb/firewall/vip': [{ name: 'web', extintf: 'port7', 'srcintf-filter': refs('port7') }],
+    'cmdb/system/zone': [{ name: 'INTERNET', interface: [{ name: 'WAN uplink', 'interface-name': 'port7' }] }],
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/router/static': [{ dst: '0.0.0.0/0', device: 'port7' }],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set srcintf "INTERNET"/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /set srcintf "port7"/);
+});
+
+test('uses zones at both ends of a VIP path and does not reuse a member-only deny', async () => {
+  const portPair = { srcintf: refs('port7'), dstintf: refs('VL100') };
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [
+      block(9, { ...portPair, srcaddr: refs('eworx-IP-Blocklist') }), entry(10, portPair),
+    ],
+    'cmdb/system/zone': [
+      { name: 'INTERNET', interface: refs('port7') }, { name: 'SERVERS', interface: refs('VL100') },
+    ],
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/router/static': [{ dst: '0.0.0.0/0', device: 'port7' }],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.equal((report.text.match(/set srcintf "INTERNET"\n\s+set dstintf "SERVERS"/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /"port7"|"VL100"|edit 9\b/);
 });
 
 test('reports unavailable objects and ISDB reads without emitting unknown references', async () => {
