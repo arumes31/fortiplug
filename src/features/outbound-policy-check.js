@@ -2,7 +2,8 @@
 
 (() => {
   const FP = window.FortiPlug;
-  const { names, interfaceNames, enabled, covers, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
+  const { names, interfaceNames, enabled, covers, includesBuiltin, wanInterfaces,
+    wirelessVapRequest, policyInterfaceExclusions, quote, cliList, readConfiguration } = FP.policyAudit;
   const BLOCKLIST = 'eworx-IP-Blocklist';
   const SSL_VPN_INTERFACE = 'ssl.root';
   const BASELINES = [
@@ -25,7 +26,7 @@
     });
   }
 
-  function internalSources(data, wan, normalize, policyInterfaces) {
+  function internalSources(data, wan, normalize, policyInterfaces, excluded) {
     const memberOf = new Map();
     for (const entry of [...data.interfaces, ...data.softwareSwitches]) {
       for (const member of names(entry.member)) memberOf.set(member, entry.name);
@@ -33,7 +34,8 @@
     for (const entry of data.hardwareSwitches) {
       for (const member of names(entry.port)) memberOf.set(member, entry.name);
     }
-    const policyName = (name) => name === SSL_VPN_INTERFACE ? undefined : normalize(memberOf.get(name) || name);
+    const policyName = (name) => normalize(memberOf.get(name) || name);
+    const excludedSources = new Set([...excluded, ...[...excluded].map(policyName)]);
     const internal = new Set(data.interfaces.filter((entry) => enabled(entry) &&
       ['lan', 'dmz'].includes(entry.role) && entry['dedicated-to'] !== 'management')
       .map((entry) => policyName(entry.name)));
@@ -45,13 +47,15 @@
       for (const name of interfaceNames(policy.srcintf)) internal.add(policyName(name));
     }
     return [...internal].filter((name) => name && name !== 'any' &&
-      name !== normalize(SSL_VPN_INTERFACE) && !wan.includes(name)).sort();
+      !excludedSources.has(name) && !wan.includes(name)).sort();
   }
 
   function auditOutbound(data) {
     const { wan: detectedWan, normalize, policyInterfaces } = wanInterfaces(data, { externalOnly: true });
-    const wan = detectedWan.filter((name) => name !== normalize(SSL_VPN_INTERFACE));
-    const internal = internalSources(data, wan, normalize, policyInterfaces);
+    const exclusions = [...policyInterfaceExclusions(data.wirelessVaps), SSL_VPN_INTERFACE];
+    const excluded = new Set([...exclusions, ...exclusions.map(normalize)]);
+    const wan = detectedWan.filter((name) => !excluded.has(name));
+    const internal = internalSources(data, wan, normalize, policyInterfaces, excluded);
     const serviceGroups = new Map(data.serviceGroups.map((entry) => [entry.name, entry]));
     const addressGroups = new Map(data.addressGroups.map((entry) => [entry.name, entry]));
     const isdbGroups = new Map(data.isdbGroups.map((entry) => [entry.name, entry]));
@@ -239,6 +243,7 @@
       ['policies', 'cmdb/firewall/policy'],
       ['settings', 'cmdb/system/settings', true],
       ['interfaces', 'cmdb/system/interface'],
+      wirelessVapRequest,
       ['zones', 'cmdb/system/zone'],
       ['sdwan', 'cmdb/system/sdwan', true],
       ['staticRoutes', 'cmdb/router/static'],

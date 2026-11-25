@@ -26,6 +26,7 @@ function fixture(overrides = {}) {
     'cmdb/firewall/policy': [rule(40)],
     'cmdb/system/settings': { 'ngfw-mode': 'profile-based' },
     'cmdb/system/interface': [{ name: 'VL100', role: 'lan', vdom: 'branch' }],
+    'cmdb/wireless-controller/vap': [],
     'cmdb/system/zone': [],
     'cmdb/system/sdwan': { status: 'enable', members: [{ interface: 'x9', zone: 'virtual-wan-link' }] },
     'cmdb/router/static': [],
@@ -68,6 +69,37 @@ async function audit(config) {
   await feature.run();
   return modal;
 }
+
+test('excludes ignored interfaces from outbound discovery and leaves mixed-scope denies alone', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/interface': [{ name: 'VL100', role: 'lan' }, { name: 'LB-EXADM', role: 'dmz' }],
+    'cmdb/system/zone': [{ name: 'ADMIN-ZONE', interface: refs('LB-EXADM') }],
+    'cmdb/router/static': ['SYSLOG-IF', 'LB-DNS'].map((device) => ({ dst: '0.0.0.0/0', device })),
+    'cmdb/firewall/policy': [
+      rule(30, { srcintf: refs('SYSLOG-IF', 'ADMIN-ZONE', 'LB-SSLVPN-DNS') }), rule(40),
+      deny(41, { srcintf: refs('VL100', 'LB-EXADM'), status: 'disable', service: refs('SMB') }),
+    ],
+  }));
+  assert.match(report.title, /4 proposed/);
+  assert.match(report.text, /set srcintf "VL100"/);
+  assert.match(report.text, /set dstintf "virtual-wan-link"/);
+  assert.doesNotMatch(report.text, /LB-EXADM|SYSLOG-IF|ADMIN-ZONE|LB-SSLVPN-DNS|LB-DNS|edit 41\b|move 41\b/);
+});
+
+test('includes tunnel-mode SSIDs in outbound rules and skips bridge and mesh SSIDs', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/interface': ['VL100', 'wifi-bridge', 'wifi-tunnel'].map((name) => ({ name, role: 'lan' })),
+    'cmdb/firewall/policy': [rule(40, { srcintf: refs('VL100', 'wifi-mesh') })],
+    'cmdb/wireless-controller/vap': [
+      { name: 'wifi-bridge', 'local-bridging': 'enable' },
+      { name: 'wifi-mesh', 'mesh-backhaul': 'enable' },
+      { name: 'wifi-tunnel', 'local-bridging': 'disable', 'mesh-backhaul': 'disable', 'split-tunneling': 'enable' },
+    ],
+  }));
+  assert.equal(report.notes[0], '2 internal-to-WAN interface pair(s) checked.');
+  assert.match(report.text, /set srcintf "VL100" "wifi-tunnel"/);
+  assert.doesNotMatch(report.text, /wifi-bridge|wifi-mesh/);
+});
 
 test('generates the four baselines and groups VLANs, zones and WANs into multi-interface rules', async () => {
   const report = await audit(fixture({

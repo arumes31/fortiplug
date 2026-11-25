@@ -22,6 +22,7 @@
         "src/policy-names.js",
         "src/policy-audit.js",
         "src/features/copy-policies.js",
+        "src/features/policy-id-column.js",
         "src/features/policy-clipboard.js",
         "src/features/bulk-interfaces.js",
         "src/features/bulk-rename.js",

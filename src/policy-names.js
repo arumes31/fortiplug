@@ -113,7 +113,7 @@
     length, shorten, validLimit, extractPurpose, parseAliases, aliasFor, inferPurpose, format, vipLabel,
     getLimit: async () => {
       const settings = await browser.storage.local.get(KEY);
-      return validLimit(settings[KEY]) ? settings[KEY] : 40;
+      return validLimit(settings[KEY]) ? settings[KEY] : 35;
     },
     setLimit: async (value) => {
       if (!validLimit(value)) throw new Error('Name limit must be a whole number from 20 to 40.');

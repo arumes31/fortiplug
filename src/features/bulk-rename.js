@@ -83,9 +83,12 @@
     const placeholder = el('input', { type: 'text', value: 'VLXX' });
     const sourcePlaceholder = el('input', { type: 'text', placeholder: 'Source: use default' });
     const destinationPlaceholder = el('input', { type: 'text', placeholder: 'Destination: use default' });
-    const aliases = el('textarea', { className: 'rename-aliases', value: 'x8=WAN\nVPN_EX-ADM*=VPN_ADM', spellcheck: false });
+    const aliases = el('textarea', { className: 'rename-aliases', value: 'x8=WAN\nvirtual-wan-link=sdwan\nVPN_EX-ADM*=VPN_ADM', spellcheck: false });
     const limit = el('input', { type: 'number', min: 20, max: 40, step: 1, value: String(savedLimit) });
     const reuse = el('input', { type: 'checkbox' });
+    const unnamedOnly = el('input', { type: 'checkbox' });
+    unnamedOnly.setAttribute('aria-label', 'Unnamed policies only');
+    const visible = (p) => !unnamedOnly.checked || !(p.name || '').trim();
     const infer = el('input', { type: 'checkbox', checked: true });
     const objectAliases = el('textarea', { className: 'rename-aliases', value: '', placeholder: 'mail.example.com=mail\nH_Server01=Server', spellcheck: false });
     const objectPrefixes = el('input', { type: 'text', value: 'H_, G_' });
@@ -165,10 +168,10 @@
       for (const p of existing) reserve(p.name, String(p.policyid));
       // Reserve all base suggestions first so colliding generated names each get
       // their own policy ID, independent of their order in the GUI.
-      for (const p of policies) if (p.checked) reserve(proposed(p), p.id);
+      for (const p of policies) if (p.checked && visible(p)) reserve(proposed(p), p.id);
       const allocated = new Map();
       const formats = new Map();
-      for (const p of policies.filter((p) => p.checked)) {
+      for (const p of policies.filter((p) => p.checked && visible(p))) {
         const base = proposed(p);
         let name = base;
         let result = formatted(p);
@@ -203,6 +206,8 @@
       ])]), tbody,
     ]);
     const summary = el('p', { className: 'muted' });
+    const filterInfo = el('p', { className: 'muted' });
+    const emptyMessage = el('p', { className: 'muted', textContent: 'No unnamed policies in the current list.', hidden: true });
     const applyBtn = el('button', { className: 'primary' });
     const resetBtn = el('button', { textContent: 'Regenerate names' });
     const rows = policies.map((p) => {
@@ -232,26 +237,29 @@
       ]);
       box.onchange = () => { p.checked = box.checked; p.status = null; update(); };
       input.oninput = () => { p.override = input.value; p.status = null; update(); };
-      tbody.append(el('tr', {}, [
+      const node = el('tr', {}, [
         el('td', {}, [box]), el('td', { textContent: p.id }), el('td', {}, [oldName, el('label', {}, [el('span', { textContent: 'Software / purpose' }), purpose]), suggestion]),
         el('td', {}, [input, length]), el('td', {}, [details]), status,
-      ]));
-      return { box, input, purpose, suggestion, oldName, length, status };
+      ]);
+      tbody.append(node);
+      return { node, box, input, purpose, suggestion, oldName, length, status };
     });
 
     const update = () => {
       const current = plans();
+      const shown = policies.filter(visible);
       let count = 0;
       let errors = 0;
       const settingsError = configError();
       current.forEach(({ p, name, suffixed, format, error, changed }, index) => {
         const row = rows[index];
+        row.node.hidden = !visible(p);
         row.oldName.textContent = p.name || '—';
         const suggestion = purposeSuggestion(p);
         row.suggestion.textContent = suggestion.reason;
         row.suggestion.title = suggestion.objects.join('\n');
-        if (p.checked && changed && !error) count++;
-        if (p.checked && error) errors++;
+        if (visible(p) && p.checked && changed && !error) count++;
+        if (visible(p) && p.checked && error) errors++;
         row.box.checked = p.checked;
         row.box.disabled = running;
         row.input.disabled = running || !p.checked;
@@ -263,19 +271,23 @@
         row.status.className = p.status?.cls || (p.checked && error ? 'err' : 'muted');
         row.status.textContent = p.status?.text || (p.checked ? error || (changed ? 'will rename' : 'no change') : '');
       });
-      allBox.disabled = running;
-      allBox.checked = policies.every((p) => p.checked);
-      allBox.indeterminate = policies.some((p) => p.checked) && !allBox.checked;
-      for (const control of [software, placeholder, sourcePlaceholder, destinationPlaceholder, aliases, limit, reuse, infer, objectAliases, objectPrefixes, shortFqdn, resetBtn]) control.disabled = running;
+      allBox.disabled = running || !shown.length;
+      allBox.checked = shown.length > 0 && shown.every((p) => p.checked);
+      allBox.indeterminate = shown.some((p) => p.checked) && !allBox.checked;
+      for (const control of [software, placeholder, sourcePlaceholder, destinationPlaceholder, aliases, limit, reuse, infer, objectAliases, objectPrefixes, shortFqdn, unnamedOnly, resetBtn]) control.disabled = running;
+      const hiddenSelections = policies.filter((p) => p.checked && !visible(p)).length;
+      filterInfo.textContent = `Showing ${shown.length} of ${policies.length} policies.${hiddenSelections ? ` ${hiddenSelections} selected policies are hidden and will not be renamed.` : ''}`;
+      emptyMessage.hidden = shown.length > 0;
       applyBtn.textContent = `Rename ${count} ${count === 1 ? 'policy' : 'policies'}`;
       applyBtn.disabled = running || !count || !!errors || !!settingsError;
       summary.className = errors || settingsError ? 'err' : 'muted';
       summary.textContent = settingsError || (errors ? `Resolve the errors in ${errors} selected policies before applying.` : `${count} policies ready to rename.`);
     };
     allBox.onchange = () => {
-      for (const p of policies) { p.checked = allBox.checked; p.status = null; }
+      for (const p of policies.filter(visible)) { p.checked = allBox.checked; p.status = null; }
       update();
     };
+    unnamedOnly.onchange = update;
     const refreshConfig = () => {
       for (const p of policies) p.status = null;
       update();
@@ -289,13 +301,13 @@
       catch (err) { FP.toast(`Could not save the shared name limit: ${err.message}`, 'error'); }
     };
     resetBtn.onclick = () => {
-      for (const p of policies) { p.override = null; p.purposeOverride = null; p.status = null; }
+      for (const p of policies.filter(visible)) { p.override = null; p.purposeOverride = null; p.status = null; }
       update();
     };
     applyBtn.onclick = async () => {
       if (running) return;
       if (configError()) return;
-      const selectedPlans = plans().filter(({ p }) => p.checked);
+      const selectedPlans = plans().filter(({ p }) => p.checked && visible(p));
       if (selectedPlans.some(({ error }) => error)) return;
       const todo = selectedPlans.filter(({ changed }) => changed);
       if (!todo.length || !confirm(`Rename ${todo.length} policies on the FortiGate using the previewed names?`)) return;
@@ -360,11 +372,12 @@
               el('label', { className: 'rename-option' }, [shortFqdn, el('span', { textContent: 'Shorten FQDN object names to the first hostname label' })]),
               el('p', { className: 'muted', textContent: 'Exact aliases take precedence over wildcard aliases and automatic cleanup. Two short names use A+B, larger sets use +N. For short VIP names, target IP aliases such as 192.168.1.192=DNS01 produce VIP_DNS01_5353. Full object names remain in Policy details. Services are taken from the policy, including ALL.' })]),
             el('fieldset', {}, [el('legend', { textContent: 'Shared name limit' }), limit,
-              el('p', { className: 'muted', textContent: '20–40 characters, default 40. Saved across dialogs and shared with copy/paste. Use 35 when required by your FortiGate.' })]),
+              el('p', { className: 'muted', textContent: '20–40 characters, default 35. Saved across dialogs and shared with copy/paste.' })]),
           ]),
           el('p', { className: 'muted', textContent: 'SRC-DST[_Purpose] (Services), or (VIP_externalPort-mappedPort-WANIP-target). Generated names keep the complete interface pair; manual name edits may override it. Long VIP names prefer VIP_target_mappedPort, using a target IP alias when configured. Deny rules include DENY. Services are shortened before the software / purpose. Shortening uses a single dot (.) and +N for omitted entries, preserving closing parentheses and _ID suffixes. Full IPs keep their normal dots. Hover for the full suggestion; expand policy details for sources, security profiles and every VIP mapping.' }),
           el('p', { className: 'muted', textContent: selected.length ? `${policies.filter((p) => p.checked).length} policies selected from the GUI.` : 'No GUI selection detected. Tick the policies to rename below.' }),
-          preview, summary,
+          el('label', { className: 'rename-option' }, [unnamedOnly, el('span', { textContent: 'Unnamed policies only' })]),
+          filterInfo, preview, emptyMessage, summary,
         ]),
         el('footer', {}, [resetBtn, applyBtn, closeBtn]),
       ]),
@@ -381,7 +394,7 @@
   FP.register({
     id: 'bulk-rename',
     label: 'Bulk rename policies',
-    description: 'Rename selected policies using interface aliases, software or purposes inferred from address objects, and services or VIP mappings. Editable preview with suggestion origins, automatic policy IDs for duplicates and shortening to 40 characters.',
+    description: 'Rename selected policies using interface aliases, software or purposes inferred from address objects, and services or VIP mappings. Editable preview with suggestion origins, automatic policy IDs for duplicates and shortening to 35 characters by default.',
     usage: 'Policy list → select policies, then FP button or right-click (ID column must be visible)',
     isAvailable: () => TABLES.has(FP.policyList.tableForPage()),
     run: openDialog,
