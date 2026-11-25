@@ -34,6 +34,7 @@ function fixture(overrides = {}) {
     'cmdb/firewall/vipgrp': [],
     'cmdb/system/settings': { 'central-nat': 'disable' },
     'cmdb/system/interface': [{ name: 'port7', role: 'lan', vdom: 'branch' }],
+    'cmdb/wireless-controller/vap': [],
     'cmdb/system/zone': [],
     'cmdb/system/sdwan': { status: 'enable', members: [{ interface: 'wan1', zone: 'virtual-wan-link' }] },
     'cmdb/router/static': [],
@@ -93,6 +94,51 @@ test('generates four ordered rules for an SD-WAN virtual server and reserves exi
   assert.doesNotMatch(cli, /Microsoft-Azure/);
   assert.match(cli, /move 2 before 10\n\s+move 3 before 10\n\s+move 4 before 10\n\s+move 5 before 10/);
   assert.equal(report.filename, 'fortiplug-inbound-vip-branch.conf');
+});
+
+test('excludes VIP paths on ignored interfaces and preserves other destinations in the same policy', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [
+      entry(8, { srcintf: refs('LB-EXADM'), dstaddr: refs('management') }),
+      entry(9, { dstintf: refs('SYSLOG-ZONE'), dstaddr: refs('logging') }),
+      entry(10, { dstintf: refs('VL100', 'LB-EXADM', 'SYSLOG-IF', 'LB-SSLVPN-DNS', 'LB-DNS') }),
+      block(7, { status: 'disable', srcaddr: refs('eworx-IP-Blocklist'), dstintf: refs('VL100', 'SYSLOG-IF') }),
+    ],
+    'cmdb/firewall/vip': ['web', 'management', 'logging'].map((name) => ({ name, extintf: 'any' })),
+    'cmdb/system/interface': [{ name: 'LB-EXADM', role: 'wan' }, { name: 'SYSLOG-IF', role: 'dmz' }],
+    'cmdb/system/zone': [{ name: 'SYSLOG-ZONE', interface: refs('SYSLOG-IF') }],
+  }));
+  assert.equal(report.notes[0], '1 inbound VIP path(s) checked.');
+  assert.match(report.text, /set dstintf "VL100"/);
+  assert.doesNotMatch(report.text, /LB-EXADM|SYSLOG-IF|SYSLOG-ZONE|LB-SSLVPN-DNS|LB-DNS|edit 7\b|"management"|"logging"/);
+});
+
+test('does not generate a wildcard interface rule when it could include a skipped interface', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [entry(10, { dstintf: refs('any') })],
+    'cmdb/system/interface': [{ name: 'SYSLOG-IF', role: 'dmz' }],
+  }));
+  assert.match(report.notes[0], /0 inbound VIP path\(s\) checked, 1 VIP\(s\) require path review/);
+  assert.doesNotMatch(report.text, /config firewall policy/);
+});
+
+test('uses paginated VAP mode data to exclude bridge and mesh VIP paths', async () => {
+  const report = await audit(fixture({
+    'cmdb/firewall/policy': [entry(10, { dstintf: refs('wifi-bridge', 'mesh-zone', 'wifi-tunnel') })],
+    'cmdb/system/zone': [{ name: 'mesh-zone', interface: refs('wifi-mesh') }],
+    'cmdb/wireless-controller/vap': (params) => {
+      assert.equal(params.format, 'name|local-bridging|mesh-backhaul');
+      return params.start === 1 ? {
+        status: 'success', results: [{ name: 'wifi-mesh', 'mesh-backhaul': 'enable' }, { name: 'wifi-tunnel' }],
+      } : {
+        status: 'success', results: [{ name: 'wifi-bridge', 'local-bridging': 'enable' }],
+        limit_reached: true, next_idx: 1,
+      };
+    },
+  }));
+  assert.equal(report.notes[0], '1 inbound VIP path(s) checked.');
+  assert.match(report.text, /set dstintf "wifi-tunnel"/);
+  assert.doesNotMatch(report.text, /wifi-bridge|wifi-mesh|mesh-zone/);
 });
 
 test('accepts existing wildcard VIP denies, ISDB groups and VIP groups in configuration order', async () => {

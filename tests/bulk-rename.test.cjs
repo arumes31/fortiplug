@@ -31,7 +31,7 @@ async function dialog(policies, selected = ['1'], options = {}) {
   const writes = [];
   let feature;
   let reloaded = false;
-  const storage = { policyNameLimit: options.limit ?? 40 };
+  const storage = options.limit === null ? {} : { policyNameLimit: options.limit ?? 40 };
   const FP = {
     register: (f) => { feature = f; },
     policyList: {
@@ -78,6 +78,7 @@ async function dialog(policies, selected = ['1'], options = {}) {
     software: inputFor('Common software / purpose'), placeholder: inputFor('Default multiple-interface placeholder'),
     sourcePlaceholder: inputFor('Source multiple-interface placeholder'), destinationPlaceholder: inputFor('Destination multiple-interface placeholder'),
     limit: inputFor('Policy name character limit'), reuse: inputFor('Reuse existing descriptions'),
+    unnamedOnly: inputFor('Unnamed policies only'), allBox: elements(root, 'input').find((e) => e.title === 'Select all'),
     infer, shortFqdn: inputFor('Shorten FQDN object labels'), prefixes: inputFor('Object prefixes to remove'),
     objectAliases: elements(root, 'textarea').find((e) => e['aria-label'] === 'Object aliases'),
     aliases: elements(root, 'textarea')[0],
@@ -200,6 +201,7 @@ test('freezes preview controls during requests and saves the exact displayed sho
   assert.equal(d.software.disabled, true);
   assert.equal(d.placeholder.disabled, true);
   assert.equal(d.names[0].disabled, true);
+  assert.equal(d.unnamedOnly.disabled, true);
   await requestStarted;
   assert.equal(d.writes[0].body.name, previewed);
   d.close.onclick();
@@ -394,6 +396,12 @@ test('expanded details show sources, ISDB, security profiles and every full VIP 
 });
 
 test('shared limit is loaded, persisted and used by copy/paste formatting', async () => {
+  for (const value of [null, 0, 41]) {
+    const defaults = await dialog([policy(1, { service: refs(['A'.repeat(60)]) })], ['1'], { limit: value });
+    assert.equal(defaults.limit.value, '35');
+    assert.equal(await defaults.naming.getLimit(), 35);
+    assert.equal(defaults.names[0].value.length, 35);
+  }
   const d = await dialog([policy(1, { service: refs(['A'.repeat(60)]) })], ['1'], { limit: 35 });
   assert.equal(d.limit.value, '35');
   assert.equal(d.names[0].value.length, 35);
@@ -700,6 +708,8 @@ test('manual sdwan names save exactly as edited with length, character and dupli
     policy(653, { srcintf: refs(['VL01', 'VL02']), dstintf: refs(['virtual-wan-link']), action: 'deny', service: refs(['SMB']) }),
     policy(703, { srcintf: refs(['VL01', 'VL02']), dstintf: refs(['virtual-wan-link']), action: 'deny', service: refs(['LDAP']) }),
   ], ['653', '703']);
+  assert.equal(d.names[0].value, 'VLXX-sdwan (DENY, SMB)');
+  assert.equal(d.names[1].value, 'VLXX-sdwan (DENY, LDAP)');
   for (const input of d.names) { input.value = 'VLXX-sdwan (DENY, SMB)'; input.oninput(); }
   assert.equal(d.apply.disabled, true);
   d.names[1].value = 'VLXX-sdwan (DENY, LDAP, +4)';
@@ -717,6 +727,75 @@ test('manual sdwan names save exactly as edited with length, character and dupli
   await d.apply.onclick();
   assert.deepEqual(d.writes.map((request) => request.body.name), ['VLXX-sdwan (DENY, SMB)', 'VLXX-sdwan (DENY, LDAP, +4)']);
   for (const request of d.writes) assert.deepEqual(Object.keys(request.body), ['name']);
+});
+
+test('unnamed filter uses saved names and preserves selections and edits across toggles', async () => {
+  const d = await dialog([
+    policy(1, { name: '' }), policy(2, { name: 'Existing' }),
+    policy(3, { name: '   ' }), policy(4, { name: undefined }), policy(5, { name: '—' }),
+  ], ['1', '2']);
+  d.names[0].value = 'New unnamed policy';
+  d.names[0].oninput();
+  d.names[1].value = 'Custom existing policy';
+  d.names[1].oninput();
+  d.unnamedOnly.checked = true;
+  d.unnamedOnly.onchange();
+  assert.deepEqual(d.rows.map((row) => row.hidden), [false, true, false, false, true]);
+  assert.equal(d.names[0].value, 'New unnamed policy');
+  assert.equal(d.names[1].value, 'Custom existing policy');
+  assert.equal(d.rows[1].children[0].children[0].checked, true);
+  assert.equal(d.apply.textContent, 'Rename 1 policy');
+  assert.ok(elements(d.root, 'p').some((e) => e.textContent.includes('1 selected policies are hidden and will not be renamed.')));
+  d.unnamedOnly.checked = false;
+  d.unnamedOnly.onchange();
+  assert.ok(d.rows.every((row) => !row.hidden));
+  assert.equal(d.names[1].value, 'Custom existing policy');
+  assert.equal(d.apply.textContent, 'Rename 2 policies');
+});
+
+test('select all and saving only affect visible unnamed policies', async () => {
+  const d = await dialog([
+    policy(1, { name: '' }), policy(2, { name: 'Existing' }), policy(3, { name: '' }),
+  ], ['2']);
+  d.names[1].value = 'X'.repeat(41);
+  d.names[1].oninput();
+  d.unnamedOnly.checked = true;
+  d.unnamedOnly.onchange();
+  assert.equal(d.allBox.checked, false);
+  d.allBox.checked = true;
+  d.allBox.onchange();
+  assert.equal(d.allBox.checked, true);
+  assert.equal(d.allBox.indeterminate, false);
+  assert.equal(d.apply.disabled, false);
+  assert.equal(d.apply.textContent, 'Rename 2 policies');
+  await d.apply.onclick();
+  assert.deepEqual(d.writes.map((request) => request.url.split('/').at(-1)), ['1', '3']);
+  assert.ok(d.rows.every((row) => row.hidden));
+  assert.equal(d.allBox.disabled, true);
+  assert.equal(d.apply.disabled, true);
+  assert.ok(elements(d.root, 'p').some((e) => e.textContent === 'No unnamed policies in the current list.' && !e.hidden));
+  d.unnamedOnly.checked = false;
+  d.unnamedOnly.onchange();
+  assert.equal(d.rows[1].children[0].children[0].checked, true);
+  assert.equal(d.names[1].value, 'X'.repeat(41));
+  assert.equal(d.apply.disabled, true);
+});
+
+test('hidden prospective names do not create conflicts and select-none and regenerate preserve hidden edits', async () => {
+  const d = await dialog([policy(1, { name: '' }), policy(2, { name: 'Existing' })], ['1', '2']);
+  d.names[1].value = 'VL01-WAN (TCP80, TCP443)';
+  d.names[1].oninput();
+  d.unnamedOnly.checked = true;
+  d.unnamedOnly.onchange();
+  assert.equal(d.names[0].value, 'VL01-WAN (TCP80, TCP443)');
+  d.allBox.checked = false;
+  d.allBox.onchange();
+  assert.equal(d.rows[0].children[0].children[0].checked, false);
+  assert.equal(d.rows[1].children[0].children[0].checked, true);
+  d.reset.onclick();
+  d.unnamedOnly.checked = false;
+  d.unnamedOnly.onchange();
+  assert.equal(d.names[1].value, 'VL01-WAN (TCP80, TCP443)');
 });
 
 if (process.env.FORTIPLUG_POLICY_SAMPLE) {

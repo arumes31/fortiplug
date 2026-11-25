@@ -12,6 +12,14 @@
   const overlaps = (refs, name) => name === 'any' ? refs.length > 0 : covers(refs, name);
   const includesBuiltin = (refs, name) => refs.some((ref) => ref.toLowerCase() === name);
   const isDefaultRoute = (prefix) => /^(0\.0\.0\.0(?:\/0|\/0\.0\.0\.0| 0\.0\.0\.0))$/.test(prefix);
+  const excludedInterfaces = ['LB-EXADM', 'SYSLOG-IF', 'LB-SSLVPN-DNS', 'LB-DNS'];
+  const wirelessVapRequest = ['wirelessVaps', 'cmdb/wireless-controller/vap', false, {
+    format: 'name|local-bridging|mesh-backhaul',
+  }];
+  const policyInterfaceExclusions = (wirelessVaps) => [
+    ...excludedInterfaces,
+    ...names(wirelessVaps.filter((vap) => vap['local-bridging'] === 'enable' || vap['mesh-backhaul'] === 'enable')),
+  ];
 
   function wanInterfaces({ interfaces, zones, sdwan, staticRoutes, activeRoutes }, { externalOnly = false } = {}) {
     const policyInterface = new Map();
@@ -55,11 +63,11 @@
   const quote = (value) => '"' + String(value).replace(/[\\"]/g, '\\$&') + '"';
   const cliList = (values) => values.map(quote).join(' ');
 
-  async function readTable(path, vdom, singleton = false) {
+  async function readTable(path, vdom, singleton = false, params = {}) {
     const results = [];
     let start = 0;
     while (true) {
-      const response = await FP.requestJson('/api/v2/' + path, { vdom, params: start ? { start } : {} });
+      const response = await FP.requestJson('/api/v2/' + path, { vdom, params: start ? { ...params, start } : params });
       const data = response.results;
       if (response.status !== 'success' || (singleton ? !data || typeof data !== 'object' : !Array.isArray(data))) {
         throw new Error('Unexpected response from ' + path);
@@ -78,7 +86,8 @@
   }
 
   async function readConfiguration(requests, vdom) {
-    const responses = await Promise.allSettled(requests.map(([, path, singleton]) => readTable(path, vdom, singleton)));
+    const responses = await Promise.allSettled(requests.map(([, path, singleton, params]) =>
+      readTable(path, vdom, singleton, params)));
     const data = {};
     const failures = new Map();
     for (const [index, [key, path]] of requests.entries()) {
@@ -90,5 +99,6 @@
     return { data, failures };
   }
 
-  FP.policyAudit = { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration };
+  FP.policyAudit = { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces,
+    wirelessVapRequest, policyInterfaceExclusions, quote, cliList, readConfiguration };
 })();

@@ -8,7 +8,8 @@
   const THREAT_FAMILIES = ['botnet', 'hosting', 'malicious', 'phishing', 'proxy', 'tor', 'vpn'];
   const threatFamily = (name) => name.toLowerCase().split('-')[0].replace(/^phising$/, 'phishing');
   const isScanner = (name) => /[.-]scanner(?:$|[.-])/i.test(name);
-  const { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces, quote, cliList, readConfiguration } = FP.policyAudit;
+  const { names, interfaceNames, enabled, covers, overlaps, includesBuiltin, wanInterfaces,
+    wirelessVapRequest, policyInterfaceExclusions, quote, cliList, readConfiguration } = FP.policyAudit;
   const pathKey = (ingress, egress, vip) => JSON.stringify([ingress, egress, vip]);
   const pairKey = (ingress, egress) => JSON.stringify([ingress, egress]);
 
@@ -117,7 +118,15 @@
 
   function policyChanges(data) {
     const { policies, vips, vipGroups, inventory, groupMembers, isdb, isdbGroups } = data;
-    const { wan, normalize, policyInterfaces } = wanInterfaces(data);
+    const { wan: detectedWan, normalize, policyInterfaces } = wanInterfaces(data);
+    const excluded = new Set(policyInterfaceExclusions(data.wirelessVaps).map(normalize));
+    const wan = detectedWan.filter((name) => !excluded.has(name));
+    const hasExcludedInterface = [...names(data.interfaces), ...names(data.zones), ...detectedWan,
+      ...policies.flatMap((policy) => [...policyInterfaces(policy.srcintf), ...policyInterfaces(policy.dstintf)]),
+      ...vips.flatMap((vip) => [...policyInterfaces(vip.extintf), ...policyInterfaces(vip['srcintf-filter'])]),
+    ].some((name) => excluded.has(normalize(name)));
+    const canChange = (rule) => ![...rule.ingressScope, ...rule.egressScope].some((name) =>
+      excluded.has(name) || (name === 'any' && hasExcludedInterface));
     const vipNames = new Set(vips.map((vip) => vip.name));
     const groups = new Map(vipGroups.map((group) => [group.name, names(group.member)]));
     const expandVips = (destinations) => new Set(destinations.flatMap((name) => groups.get(name) || name)
@@ -178,19 +187,33 @@
     const paths = new Map();
     const unresolved = [];
     const published = new Set();
+    let wildcardNeedsReview = false;
     const vipBindings = new Map(vips.map((vip) => [
       vip.name, interfaceNames(vip.extintf).filter((name) => name !== 'any').map(normalize),
     ]));
     for (const vip of vips.filter(enabled)) {
       const bindings = vipBindings.get(vip.name);
       const filters = interfaceNames(vip['srcintf-filter']).filter((name) => name !== 'any').map(normalize);
+      if ([bindings, filters].some((refs) => refs.length && refs.every((name) => excluded.has(name)))) continue;
       const candidates = wan.filter((name) =>
         (!bindings.length || bindings.includes(name)) && (!filters.length || filters.includes(name)));
       let found = false;
+      let skipped = false;
+      let hasOtherRule = false;
       for (const rule of rules) {
         if (!rule.enabled || rule.action !== 'accept' || !rule.vips.has(vip.name)) continue;
+        if ([rule.ingressScope, rule.egressScope].some((refs) => refs.length && refs.every((name) => excluded.has(name)))) {
+          skipped = true;
+          continue;
+        }
+        hasOtherRule = true;
         for (const ingress of candidates.filter((name) => covers(rule.ingressScope, name))) {
           for (const egress of rule.egressScope) {
+            if (excluded.has(egress)) continue;
+            if (egress === 'any' && hasExcludedInterface) {
+              wildcardNeedsReview = true;
+              continue;
+            }
             const key = pathKey(ingress, egress, vip.name);
             paths.set(key, { ingress, egress, vip: vip.name });
             if (!rule.allowScanner) published.add(key);
@@ -198,7 +221,7 @@
           }
         }
       }
-      if ((!bindings.length || candidates.length || !wan.length) && !found) unresolved.push(vip.name);
+      if ((!bindings.length || candidates.length || !wan.length) && !found && (!skipped || hasOtherRule)) unresolved.push(vip.name);
     }
 
     const notes = [];
@@ -207,6 +230,7 @@
     const newDenies = [];
     const scannerOrder = [];
     if (!wan.length && vips.some(enabled)) notes.push('No WAN policy interface was found. Check WAN roles, SD-WAN, and default routes.');
+    if (wildcardNeedsReview) notes.push('VIP publishing policies with destination interface any require review when excluded interfaces are present.');
     if (unresolved.length) {
       details.push('VIPs without a verified inbound policy path', ...unresolved.map((name) => '  ' + name), '');
     }
@@ -250,7 +274,7 @@
     for (const { path, eligible } of checks) {
       const effective = eligible.filter((rule) => coverage(rule, path.vip));
       const candidates = eligible
-        .filter((rule) => (rule.allDestinations || rule.vips.has(path.vip)) && !coverage(rule, path.vip))
+        .filter((rule) => canChange(rule) && (rule.allDestinations || rule.vips.has(path.vip)) && !coverage(rule, path.vip))
         .sort((a, b) => Number(b.enabled) - Number(a.enabled));
       if (!effective.some((rule) => rule.blocklist)) {
         const blocklistDeny = candidates.find((rule) => rule.blocklist);
@@ -294,7 +318,7 @@
         if (!entries.length) continue;
         const existing = effective.filter((rule) => wildcardCoverage(rule) && rule.srcIsdb &&
           [...rule.isdbNames].some(matchesSource));
-        const appendTo = existing.find((rule) => rule.ingress.every((name) => wan.includes(name)));
+        const appendTo = existing.find((rule) => canChange(rule) && rule.ingress.every((name) => wan.includes(name)));
         if (appendTo) {
           const { appendIsdb } = planRepair(appendTo);
           for (const name of entries) appendIsdb.add(name);
@@ -408,6 +432,7 @@
       ['vipGroups', 'cmdb/firewall/vipgrp'],
       ['settings', 'cmdb/system/settings', true],
       ['interfaces', 'cmdb/system/interface'],
+      wirelessVapRequest,
       ['zones', 'cmdb/system/zone'],
       ['sdwan', 'cmdb/system/sdwan', true],
       ['staticRoutes', 'cmdb/router/static'],

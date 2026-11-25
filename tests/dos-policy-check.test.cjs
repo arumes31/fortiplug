@@ -24,7 +24,7 @@ function fixture(overrides = {}) {
   };
 }
 
-async function audit(config) {
+async function audit(config, version = 'v7.6.6') {
   let feature, modal;
   const FP = {
     register: (value) => { feature = value; },
@@ -38,7 +38,7 @@ async function audit(config) {
       assert.equal(options.method, undefined);
       assert.equal(options.body, undefined);
       assert.ok(Object.hasOwn(config, key), key);
-      return { status: 'success', results: config[key] };
+      return { status: 'success', results: config[key], version };
     },
   };
   vm.runInNewContext(source, { window: { FortiPlug: FP } });
@@ -179,4 +179,40 @@ test('uses a zone for its member and keeps a standalone WAN interface when SD-WA
   }));
   const interfaces = replay(report.text).map((policy) => policy.interface).sort();
   assert.deepEqual(interfaces, ['INTERNET', 'INTERNET', 'INTERNET', 'wan2', 'wan2', 'wan2']);
+});
+
+test('uses direct WAN members on FortiOS 7.4 and 7.6.0 while excluding disabled members and private tunnels', async () => {
+  const config = fixture({
+    'cmdb/system/interface': [
+      { name: 'wan1', role: 'wan', type: 'physical' },
+      { name: 'wan2', role: 'wan', type: 'physical' },
+      { name: 'overlay', type: 'tunnel' },
+    ],
+    'cmdb/system/sdwan': { status: 'enable', members: [
+      { interface: 'wan1', zone: 'virtual-wan-link' },
+      { interface: 'wan2', zone: 'virtual-wan-link', status: 'disable' },
+      { interface: 'overlay', zone: 'virtual-wan-link' },
+    ] },
+    'cmdb/firewall/DoS-policy': [
+      { policyid: 15, interface: 'wan1', srcaddr: refs('all'), dstaddr: refs('all'), service: refs('ALL') },
+    ],
+  });
+  for (const version of ['v7.4.11', 'v7.6.0']) {
+    const report = await audit(config, version);
+    const policies = replay(report.text, config['cmdb/firewall/DoS-policy']);
+    assert.match(report.text, /move \d+ before 15/);
+    assert.ok(policies.every((policy) => policy.interface === 'wan1'));
+    assert.deepEqual(policies.map((policy) => policy.srcaddr), ['G_SecurityScanner', 'G_MSTeams', refs('all')]);
+  }
+  const report = await audit(config, 'v7.6.1');
+  assert.equal(replay(report.text).filter((policy) => policy.interface === 'virtual-wan-link').length, 3);
+  assert.doesNotMatch(report.text, /set interface "wan[12]"|set interface "overlay"/);
+});
+
+test('reports unknown firmware and skips SD-WAN DoS policy targets', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/sdwan': { status: 'enable', members: [{ interface: 'wan1' }, { interface: 'wan2' }] },
+  }), null);
+  assert.match(report.notes.join(' '), /FortiOS version unavailable/);
+  assert.equal(report.filename, undefined);
 });

@@ -23,10 +23,32 @@
     return selected.length === 1 && selected[0].toLowerCase() === value.toLowerCase();
   };
 
-  function interfacesForCheck(data, { wan, wanZoneNames, normalize }) {
+  function supportsSdwanZones(version) {
+    const parsed = /^v?(\d+)\.(\d+)\.(\d+)/i.exec(String(version));
+    if (!parsed) return null;
+    const [, major, minor, patch] = parsed.map(Number);
+    return major > 7 || (major === 7 && (minor > 6 || (minor === 6 && patch >= 1)));
+  }
+
+  function interfacesForCheck(data, { wan, wanZoneNames, normalize }, zoneSupport) {
     if (data.sdwan.status !== 'enable') return wan;
-    const zones = names(data.sdwan.zone);
+    const zones = interfaceNames(data.sdwan.zone);
     const members = data.sdwan.members || [];
+    if (zoneSupport !== true) {
+      const zoneNames = new Set(['virtual-wan-link', ...zones, ...members.flatMap((member) => interfaceNames(member.zone))]);
+      const standalone = wan.filter((name) => !zoneNames.has(name) || wanZoneNames.includes(name));
+      if (zoneSupport === null) return standalone;
+      const devices = new Map(data.interfaces.map((entry) => [entry.name, entry]));
+      const uplinks = members.filter(enabled).flatMap((member) => interfaceNames(member.interface)).filter((intf) => {
+        const device = devices.get(intf);
+        const zone = normalize(intf);
+        if (!wan.includes(zone) || wanZoneNames.includes(zone)) return false;
+        if (!device) return true;
+        const uplinkType = !device.type || ['physical', 'aggregate', 'vlan', 'pppoe'].includes(device.type);
+        return enabled(device) && (device.role === 'wan' || (uplinkType && !['lan', 'dmz'].includes(device.role)));
+      });
+      return [...new Set([...standalone, ...uplinks])].sort();
+    }
     const usedZones = members.filter(enabled).map((member) =>
       normalize(interfaceNames(member.interface)[0]) || interfaceNames(member.zone)[0] || 'virtual-wan-link');
     if (usedZones.includes('virtual-wan-link') || (!members.length && (!zones.length || zones.includes('virtual-wan-link')))) {
@@ -76,7 +98,8 @@
 
   function plan(data) {
     const topology = wanInterfaces(data, { externalOnly: true });
-    const interfaces = interfacesForCheck(data, topology);
+    const zoneSupport = supportsSdwanZones(data.policyVersion);
+    const interfaces = interfacesForCheck(data, topology, zoneSupport);
     const policies = data.policies.map((policy, index) => ({ ...policy, id: Number(policy.policyid), index }));
     const ids = new Set(policies.map((policy) => policy.id));
     const usedNames = new Set(policies.map((policy) => policy.name?.toLowerCase()));
@@ -127,7 +150,7 @@
       const exceptions = selected.slice(0, -1);
       const baselineIds = new Set(selected.map((policy) => policy.id));
       const others = policies.filter((policy) => enabled(policy) && !baselineIds.has(policy.id) &&
-        covers(topology.policyInterfaces(policy.interface), intf));
+        (covers(interfaceNames(policy.interface), intf) || covers(topology.policyInterfaces(policy.interface), intf)));
       const shadow = others.find((policy) => exact(policy.srcaddr, 'all') &&
         exact(policy.dstaddr, 'all') && exact(policy.service, 'ALL') && policy.index < fallback.index);
       if (shadow) moves.push({ id: fallback.id, direction: 'before', anchor: shadow.id });
@@ -150,7 +173,7 @@
       }
     }
     for (const { id, direction, anchor } of moves) details.push('Move policy #' + id + ' ' + direction + ' policy #' + anchor + '.');
-    return { interfaces, edits, moves, details };
+    return { interfaces, edits, moves, details, unknownSdwanVersion: data.sdwan.status === 'enable' && zoneSupport === null };
   }
 
   function renderCli({ edits, moves }) {
@@ -208,6 +231,7 @@
     const cli = renderCli(report);
     const findings = report.details.join('\n');
     const notes = ['WAN interfaces checked: ' + (report.interfaces.join(', ') || 'none') + '.'];
+    if (report.unknownSdwanVersion) notes.push('FortiOS version unavailable. SD-WAN targets require review before generating DoS CLI.');
     if (failures.size) notes.push('Some data could not be read: ' + [...failures.values()].join(', ') + '.');
     FP.showModal({
       title,
