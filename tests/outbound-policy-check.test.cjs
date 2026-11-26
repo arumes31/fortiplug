@@ -101,6 +101,19 @@ test('includes tunnel-mode SSIDs in outbound rules and skips bridge and mesh SSI
   assert.doesNotMatch(report.text, /wifi-bridge|wifi-mesh/);
 });
 
+test('uses the configured WAN and omits runtime PPPoE interface names from outbound CLI', async () => {
+  const report = await audit(fixture({
+    'cmdb/system/sdwan': { status: 'disable' },
+    'cmdb/system/interface': [{ name: 'VL100', role: 'lan' }, { name: 'wan', role: 'wan', mode: 'pppoe' }],
+    'cmdb/firewall/policy': [rule(24, { dstintf: refs('wan') })],
+    'monitor/router/ipv4': [{ ip_mask: '0.0.0.0/0', interface: 'ppp2' }],
+  }));
+  assert.equal(report.notes[0], '1 internal-to-WAN interface pair(s) checked.');
+  assert.equal((report.text.match(/set dstintf "wan"\n/g) || []).length, 4);
+  assert.doesNotMatch(report.text, /ppp2/);
+  assert.match(report.text, /move \d+ before 24/);
+});
+
 test('generates the four baselines and groups VLANs, zones and WANs into multi-interface rules', async () => {
   const report = await audit(fixture({
     'cmdb/firewall/policy': [

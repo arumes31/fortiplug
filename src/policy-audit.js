@@ -56,7 +56,10 @@
     }
     const normalize = (intf) => policyInterface.get(intf) || intf;
     const policyInterfaces = (refs) => [...new Set(interfaceNames(refs).map(normalize))];
-    const targets = [...new Set([...wan].map(normalize))].filter(Boolean).sort();
+    // Routing data can expose runtime PPPoE devices such as ppp2. Policies
+    // reference the configured interface or its zone, not the session device.
+    const targets = [...new Set([...wan].map(normalize))].filter((name) => name &&
+      (!/^ppp\d+$/i.test(name) || devices.has(name) || systemZones.has(name))).sort();
     return { wan: targets, wanZoneNames: targets.filter((intf) => systemZones.has(intf)), normalize, policyInterfaces };
   }
 
